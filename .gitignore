@@ -1,0 +1,46 @@
+# Compiled object files
+*.o
+*.obj
+
+# Compiled dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Compiled executables
+*.exe
+*.out
+
+# C++ build artifacts
+build/
+bin/
+
+# Python build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+
+# IDE specific files
+.vscode/
+*.code-workspace
+
+# Miscellaneous
+.DS_Store
+Thumbs.db
+
+# Large data files and sensitive/ignored data
+*.nfs*
+data/
+ckpt/
+data_bin/MeituanBeijing/
+data_bin/MeituanShanghai/
+data_bin/GeoGLUE/
+data_bin/GeoGLUE_clean/
+model/tmp/
+nnue/nnue_v19
+nnue/nnue_v19_uncompress
+result/*.npy
