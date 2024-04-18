@@ -450,8 +450,8 @@ public:
 class NNUE {
 public:
     alignas(64) uint16_t depth;
-    alignas(64) int16_t encoder_weight[NUM_SLICES * NUM_BITS][256];
-    alignas(64) int16_t encoder_bias[256];
+    alignas(64) int32_t encoder_weight[NUM_SLICES * NUM_BITS][256];
+    alignas(64) int32_t encoder_bias[256];
 
     alignas(64) NNUEBottleNeck * bottleneck = nullptr;
     
@@ -546,29 +546,29 @@ public:
         static_assert(ideal_register_num % MAX_AVX2_REGISTERS == 0, "The ideal register number should be divisible by MAX_AVX2_REGISTERS");
         constexpr int loop_num = ideal_register_num / MAX_AVX2_REGISTERS;
         constexpr int num_chunks = MAX_AVX2_REGISTERS;
-        alignas (64) int16_t buffer[256];
+        alignas (64) int32_t buffer[256];
         int normalization = bloom_filter.size(); // In our case, it always > 0
         alignas (64) int bound = normalization * 127;
         __m256i regs[num_chunks];
-        // DEBUG: check if the encoder_weight is aligned
-
-        for (int i = 0; i < num_chunks; ++i) {
-            regs[i] = _mm256_load_si256((__m256i *) & encoder_bias[i * 16]);
-        }
-        for (uint16_t b: bloom_filter) {
+        
+        for (int loop=0; loop<256; loop+=128) {
             for (int i = 0; i < num_chunks; ++i) {
-                regs[i] = _mm256_add_epi16(regs[i], _mm256_load_si256((__m256i *) &encoder_weight[b][i * 16]));
+                regs[i] = _mm256_load_si256((__m256i *) & encoder_bias[i * 8 + loop]);
+            }
+            for (uint16_t b: bloom_filter) {
+                for (int i = 0; i < num_chunks; ++i) {
+                    regs[i] = _mm256_add_epi32(regs[i], _mm256_load_si256((__m256i *) &encoder_weight[b][i * 8 + loop]));
+                }
+            }
+            // clipping to [0, bound]
+            for (int i = 0; i < num_chunks; ++i) {
+                regs[i] = _mm256_min_epi32(regs[i], _mm256_set1_epi32(bound));
+                regs[i] = _mm256_max_epi32(regs[i], _mm256_set1_epi32(0));
+            }
+            for (int i = 0; i < num_chunks; ++i) {
+                _mm256_store_si256((__m256i *) & buffer[i * 8 + loop], regs[i]);
             }
         }
-        // clipping to [0, bound]
-        for (int i = 0; i < num_chunks; ++i) {
-            regs[i] = _mm256_min_epi16(regs[i], _mm256_set1_epi16(bound));
-            regs[i] = _mm256_max_epi16(regs[i], _mm256_set1_epi16(0));
-        }
-        for (int i = 0; i < num_chunks; ++i) {
-            _mm256_store_si256((__m256i *) & buffer[i * 16], regs[i]);
-        }
-
         // The bit normalization will bring significant precision loss if we do it right after the
         // encoder. So we do it after the l1 layer matmul.
         // We do looped multiplication instead of avx2, which greatly mitigate precision loss.

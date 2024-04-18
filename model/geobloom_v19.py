@@ -317,7 +317,6 @@ class BloomNNUE(nn.Module):
         weight_bound = quantized_one / weight_scale
         self.weight_bound = weight_bound
         self.weight_clipping = [
-            {'params' : [self.encoder.weight], 'min_weight' : - (2**15 - 1) // 127, 'max_weight' : (2**15 - 1) // 127 }, # For 16-bit quantization
             {'params' : [self.d.weight], 'min_weight' : 0, 'max_weight' : 127 },
         ]
 
@@ -363,14 +362,14 @@ class BloomNNUE(nn.Module):
         '''
 
         if not size_test:
-            # In real inference, we follows the NNUE quantization scheme, which yields much smaller model file (~28 MB)
-            serialzer_encoder = lambda x: x.mul(self.quantized_one).round().to(torch.int16).flatten().cpu().numpy()
+            # In production environment inference, we follows the NNUE quantization scheme, which yields slightly larger model file (~44 MB)
+            serialzer_encoder = lambda x: x.mul(self.quantized_one).round().to(torch.int32).flatten().cpu().numpy()
             serialzer8 = lambda x: x.mul(self.weight_scale).round().to(torch.int8).flatten().cpu().numpy()
             serialzer32 = lambda x: x.mul(self.quantized_one * self.weight_scale).round().to(torch.int32).flatten().cpu().numpy()
             serializer_float = lambda x: x.flatten().cpu().numpy().astype(np.float32)
         else:
             # In size test, we use all 16-bit format to compare with other baselines in fp16 (~40MB)
-            # NOTE: This is only for academic comparison. the resulting model is not only larger but also can't correctly.
+            # NOTE: This is only for theoretical comparison. the resulting model is not only larger but also can't correctly.
             serialzer_encoder = lambda x: x.mul(self.quantized_one).round().to(torch.int16).flatten().cpu().numpy()
             serialzer8 = lambda x: x.mul(self.weight_scale).round().to(torch.int16).flatten().cpu().numpy()
             serialzer32 = lambda x: x.mul(self.quantized_one * self.weight_scale).round().to(torch.int16).flatten().cpu().numpy()
@@ -759,13 +758,13 @@ class GeoKMeansTree:
             prev_level = current_level
 
         # Remove the first several levels
-        if dataset == 'MeituanBeijing' or dataset == 'MeituanBeijingZero':
+        if dataset == 'MeituanBeijing':
             first_level_width = 50
-        elif dataset == 'MeituanShanghai' or dataset == 'MeituanShanghaiZero' or dataset == 'Meituan':
+        elif dataset == 'MeituanShanghai':
             first_level_width = 200
-        elif dataset == 'GeoGLUE' or dataset == 'GeoGLUEZero':
+        elif dataset == 'GeoGLUE':
             first_level_width = 4000
-        elif dataset == 'GeoGLUE_clean' or dataset == 'GeoGLUE_cleanZero':
+        elif dataset == 'GeoGLUE_clean':
             first_level_width = 1000
         else:
             raise NotImplementedError
@@ -1031,16 +1030,16 @@ def train(model: BloomNNUE, optimizer, tree: GeoKMeansTree, train_beam_width, in
     retrieve_loss = lambda pred, truth: lambdaLoss(pred, truth, k=100, reduction='sum')
     rank_loss = lambda pred, truth: lambdaLoss(pred, truth, weighing_scheme='lambdaRank_scheme', k=30, reduction='sum')
     context_loss = lambda pred, truth: lambdaLoss(pred, truth, k=30, reduction='sum')
-
-    scaler = torch.cuda.amp.GradScaler()
-
+    
+    ckpt_path = f'ckpt/{tree.dataset}_geobloom_v{VERSION}.pt' if portion is None else f'ckpt/{tree.dataset}_geobloom_v{VERSION}_{portion}.pt'
     transfer_path = f'model/tmp/{tree.dataset}_v{VERSION}/' if portion is None else f'model/tmp/{tree.dataset}_v{VERSION}_{portion}/'
+    
+    scaler = torch.cuda.amp.GradScaler()
     if not os.path.exists(transfer_path):
         os.makedirs(transfer_path)
 
     if not os.path.exists('ckpt'):
         os.makedirs('ckpt')
-        ckpt_path = f'ckpt/{tree.dataset}_geobloom_v{VERSION}.pt' if portion is None else f'ckpt/{tree.dataset}_geobloom_v{VERSION}_{portion}.pt'
 
     train_beam_width_str = '-'.join([str(x) for x in train_beam_width] if isinstance(train_beam_width, list) else [
         str(train_beam_width) for _ in range(tree.depth)])
@@ -1381,7 +1380,7 @@ if __name__ == '__main__':
         'MeituanBeijing': [400, 400, 400, 400],
         'MeituanShanghai': [400, 400, 400, 400],
         'GeoGLUE': [6000, 4000, 4000, 1000],
-        'GeoGLUE_clean': [1000, 1000, 1000, 1000],
+        'GeoGLUE_clean': [2000, 1000, 1000, 1000],
     }
 
     # Initialize the model
