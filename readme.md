@@ -131,7 +131,7 @@ Predictions saved to data_bin/GeoGLUE_clean/test_nodes.bin
 
 ### Varying Training Data Portions
 
-Our model improves stably and consistently from 0.2% to 100% training data usage. 
+Our model improves stably and consistently from 2% to 100% training data usage. 
 
 #### Steps:
 
