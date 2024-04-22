@@ -6,7 +6,7 @@
 ## Quick Start
 
 - With this repository, you can
-  - Download the GeoGLUE and GeoGLUE-clean dataset in the paper.
+  - Download the GeoGLUE and GeoGLUE-clean datasets in the paper.
   - Quickly reproduce the unsupervised results of GeoBloom.
   - Train and reproduce the supervised effectiveness of GeoBloom.
   - Compare with baselines BM25-D, BERT, OpenAI-D and DPR-D.
@@ -14,11 +14,11 @@
 
 ### Environment Preparation
 
-While our framework can run on various devices, to ensure it work smoothly, we recommend:
+While our framework can run on various devices, to ensure it works smoothly, we recommend:
 
 - A computer **Linux** system (we use Ubuntu 20.04) with CPUs supporting **AVX-2** instruction set. 
-  - Currently this code repo doesn't support other system due to our heavy workload.
-  - It should be easy to transfer our code to these system as well.
+  - Currently, this code repo doesn't support other systems due to our heavy workload.
+  - It should be easy to transfer our code to these systems as well.
 - Please use **Miniconda or Anaconda**
 
 - We use Python 3.11.5 Lower versions are not tested.
@@ -36,18 +36,18 @@ Our methods required:
 
 - Clone this repository.
 - Unzip the GeoGLUE_clean.zip in the data folder. 
-  - GeoGLUE is too large to be include in this anonymized repo directly.
-  - You can either process it on you own, or wait for us to release the GoogleDrive.
+  - GeoGLUE is too large to be included in this anonymized repo directly.
+  - You can either process it on your own or wait for our release of a Google Drive link.
 
 
 #### Notes
 
-- We redistribute the **GeoGLUE** dataset following their [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/?spm=5176.12282016.0.0.63b47586Niz8D0) license. 
+- We will redistribute the **GeoGLUE** dataset following their [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/?spm=5176.12282016.0.0.63b47586Niz8D0) license. 
   - The original dataset is from [modelscope.cn](https://www.modelscope.cn/datasets/iic/GeoGLUE/summary)
   - We extract the text, latitude, longitude, and ground truth ids, project them into Euclidean space with pyproj library:
     - proj = pyproj.Transformer.from_crs( 'epsg:4326', 'epsg:2385')
 - As GeoGLUE contains over 50% of fake POIs, we align their queries to real POIs, which forms a new dataset GeoGLUE-clean.
-  - The text, latitude and longitude of each query remains unchanged.
+  - The text, latitude, and longitude of each query remain unchanged.
   - The ground truth id now point to our real POIs.
   - Those queries that can't find a real POI in our dataset are excluded. 
 - Meituan-Beijing and Meituan-Shanghai can't be released due to license constraints.
@@ -89,9 +89,9 @@ Predictions saved to data_bin/GeoGLUE_clean/test_nodes.bin
 
 Note:
 
-- The intermediate recall scores shows the recall rates of beam search at each tree depth. It gives insights on the beam width selection.
+- The intermediate recall scores show the recall rates of beam search at each tree depth. It gives insights into the beam width selection.
 - We support multi-threading (8 threads in the above example) for your convenience, but the QPS is always evaluated per thread.
-- Here, we simply choose an equal beam-width (e.g., 4000) and it can be quite "slow". You can set different beam widths at each tree levels to obtain faster speed.
+- Here, we simply choose a unified beam width (e.g., 4000) and it can be quite "slow". You can set different beam widths at each tree level to obtain faster speed.
 
 
 ### Supervised Effectiveness
@@ -100,7 +100,7 @@ The training requires an NVIDIA GPU. We tested on A6000 24GB / NVIDIA V100 32GB,
 
 #### Steps:
 
-- Compile the nnue engine. You must do it first as the python script rely on this C++ engine.
+- Compile the NNUE engine. You must do it first as the training script relies on this C++ engine.
   - **g++ nnue/v19/nnue.cpp -o nnue/v19/nnue -pthread -mavx2 -O3 -fno-tree-vectorize**
   
 - Run the training script
@@ -175,11 +175,11 @@ To restore from a certain best training, run:
 
 - You can directly see the inference time from the model output.
 - We recommend to use specialized tools (e.g., valgrind) for memory usage.
-- The disk usage of our model are the sum of poi.bin, node_v19.bin, nnue_v19.bin, and tree.bin in the data_bin folder.
-  - In NNUE quantization scheme, not every parameters are stored in 16-bit numbers, preventing a fair comparison. 
+- The disk usage of our model ise the sum of poi.bin, node_v19.bin, nnue_v19.bin, and tree.bin in the data_bin folder.
+  - In NNUE quantization scheme, not every parameter is stored in 16-bit numbers, preventing a fair comparison. 
   - We thereby provide an option, by running.
     - python model/geobloom.py --dataset GeoGLUE_clean --task size_test
-  - It converts everything into 16bit. And you can directly compare with PLMs (e.g., DPR_D) which needs much larger sizes when stored in 16-bits.
+  - It converts everything into 16-bit. Then, you can directly compare with PLMs (e.g., DPR_D), which need much larger sizes when stored in 16-bit.
 
 You should see something like this:
 
@@ -194,14 +194,12 @@ Total - 553.16
 ==================================
 ```
 
-- During actual inference, the file size is close to the report above except for pre-computed embeddings. However, it only needs simple conversions. We will implement this in recent updates. 
-
 ### Baselines
 
-- For your convenience, we also provide the baselines BM25-D, OpenAI-D, and DPR-D that are relatively powerful in our tasks.
+- For your convenience, we provide the baselines BM25-D, OpenAI-D, and DPR-D, which are relatively powerful in our tasks.
 - You can quickly evaluate all baselines versus our method, but these methods require additional packages (jieba, acceleration, transformers,...)
 - We strictly conduct experiments without any cherry-picking, so the result should be very close to that reported in our paper. 
-  - You need OpenAI key for the OpenAI baseline, and it will cost around $2. We use the API on March 3th, 2024. Until that time, it was still not as competitive as BM25 on the provided datasets.
+  - You need OpenAI key for the OpenAI baseline, and it will cost around $2. We used the API on March 4th, 2024. Until that time, it was still not as competitive as BM25 on the provided datasets.
   - BM25_D's performance is slightly enhanced with a specialized tokenizer *jieba Chinese text segmentation library* and *jieba.lcut_for_search* function.
   - DPR_D requires negative sampling. We use the BM25_D to generate hard negative samples for it.
 
@@ -222,9 +220,9 @@ GeoBloom
 | ├── OpenAI # OpenAI API
 | └── DPR	# Modified from NanoDPR https://github.com/Hannibal046/nanoDPR
 ├── ckpt # Store the checkpoints previously trained.
-├── data  # Please download and decomporess the file from the Google Drive above.
-| ├── GeoGLUE === Raw data consists of poi.txt, train.txt, dev.txt, and test.txt.
-| └── GeoGLUE_Cleaned
+├── data  
+| ├── GeoGLUE === Will release soon.
+| └── GeoGLUE_Cleaned # Please decompress the file from this repo.
 ├── data_bin === The model will generate binary files here for C++ inference.
 ├── model
 |	├── bloom_filter.py  === The vanilla Bloom filter generator.
@@ -236,7 +234,7 @@ GeoBloom
 |	└── train_portion.py === Split the training data into various portions.
 ├── nnue  === The native inference engine implemented in C++
 |	└── v19
-|	    ├── nnue_avx2.h  === The header file for essential data strucures and NNUE engine.
+|	    ├── nnue_avx2.h  === The header file for essential data structures and NNUE engine.
 |		├── nnue.cpp  === The main executable source file.
 |	    ├── nnue_avx2_unsupervised.h  === unsupervised version.
 |		└── nnue_unsupervised.cpp === unsupervised version.
