@@ -56,7 +56,7 @@ Our methods required:
 
 ### Unsupervised Effectiveness
 
-We provide an unsupervised version of the GeoBloom that doesn't require training. Inference is conducted on AMD Ryzen Threadripper PRO 5965WX 24-Cores as we don't have idle Intel i9-10900K for testing.
+We provide an unsupervised version of the GeoBloom that doesn't require training.
 
 #### Steps:
 
