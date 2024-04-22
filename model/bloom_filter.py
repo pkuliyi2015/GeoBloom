@@ -1,6 +1,6 @@
 '''
     Prepare Bloom Filter hash function
-    This is the most naive implementation of a bloom filter in BloomNNUE.
+    This is a vanilla Bloom filter, suggesting great room of improvements.
 '''
 
 
@@ -8,8 +8,11 @@ import math
 import hashlib
 import xxhash
 
+from tqdm import tqdm
 from struct import pack, unpack
 
+NUM_SLICES = 4
+NUM_BITS = 8192 
 
 def bloom_param_estimate(capacity, error_rate=0.01):
     """Implements a space-efficient probabilistic data structure
@@ -83,8 +86,43 @@ def make_hashfuncs(num_slices, num_bits):
 
     return _hash_maker, hashfn
 
+def load_data(file_dir, is_query=True):
+    bloom_filters = []
+    locs = []
+    truths = []
+    hash_func_inner, _ = make_hashfuncs(NUM_SLICES, NUM_BITS)
 
-# Test
-if __name__ == '__main__':
-    make_hashes, _ = make_hashfuncs(4, 8192)
-    print(list(make_hashes('test')))
+    def hash_func(t):
+        hash_list = list(hash_func_inner(t))
+        for i in range(1, NUM_SLICES):
+            hash_list[i] += i * NUM_BITS
+        return set(hash_list)
+    
+    def ngram_split(text, n=3):
+        ngrams = set()
+        for k in range(1, n + 1):
+            for i in range(len(text) - k + 1):
+                ngrams.add(text[i:i + k])
+        return ngrams
+    
+    with open(file_dir, 'r') as f:
+        lines = f.readlines()
+        for line in tqdm(lines, desc='Loading '+ ('query' if is_query else 'POI') + ' data'):
+            line = line.strip().split('\t')
+            # Avoid mixing the fields in POIs. This helps to reduce the size of POI bloom filters.
+            if not is_query:
+                fields = set(line[0].split(','))
+                text = set()
+                for field in fields:
+                    text.update(ngram_split(field))
+            else:
+                text = ngram_split(line[0])
+            bloom_filter = set()
+            for t in text:
+                bloom_filter.update(hash_func(t))
+            bloom_filters.append(bloom_filter)
+            x, y = float(line[1]), float(line[2])
+            locs.append([x, y])
+            if is_query:
+                truths.append([int(x) for x in line[3].split(',')])
+    return bloom_filters, locs, truths

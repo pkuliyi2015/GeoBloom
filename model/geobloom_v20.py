@@ -141,52 +141,24 @@
         It seems that the bottleneck is important. Simply splitting the heads for different layers doesn't work as good as v18.
         The result shows that the bottleneck is important. We should use different bottleneck for different layers.
         
+    
+    v20 - Inverse Bit Frequencies and Paper Submission.
 
-        Experimental Results on Private Datasets, Xeon E5-2698 2.20GHz (* means the best result):
+        Experimental Results (* means the best result): We use the whole set of Meituan-Beijing and Meituan-Shanghai dataset and supplement a 
+        GeoGLUE_clean dataset.
 
-            MeituanBeijing: beam 200-300-300-300
-            Total search time of all threads: 5.88955s, Query Per Second: 1606.41 (v17), 1247.86 (v18)
-            =============== Intermediate Recall Scores ==============
-            0.984915        0.939978        0.874999                    (GeoBloom v19 no context)*
-            0.986297        0.935612        0.872766                    (GeoBloom v19)
-            ====================== Evaluation =======================
-            Recall@20        Recall@10       NDCG@5          NDCG@1
-            0.825786        0.788883        0.643527        0.547722    (GeoBloom v19 no context)
-            0.824922        0.786649        0.644604        0.549730    (GeoBloom v19)
-            0.726300        0.663300        0.505600        0.414500    (Best Baseline TkQ-DPR_D)
-            =========================================================
+        Directly run the code on an 10900K within this repo, we should get the following results (the v19 is reported in the paper):
 
-            MeituanShanghai: beam 200-400-300-300
-            Total search time of all threads: 12.1486s, Query Per Second: 1046.87(v17), 781.081(v18)
-            =============== Intermediate Recall Scores ==============
-            0.965070        0.932397        0.884622                    (GeoBloom v19 no context)*
-            0.962212        0.928148        0.882186                    (GeoBloom v19)
-            ====================== Evaluation =======================
-            Recall@20        Recall@10       NDCG@5          NDCG@1
-            0.826102        0.790903        0.658958        0.567857    (GeoBloom v19 no context)
-            0.825824        0.794026        0.663791        0.572260    (GeoBloom v19)*
-            0.771700        0.734800        0.574200        0.455600    (Best Baseline TkQ-DPR_D)
-            =========================================================
+        Unsupervised Performance:
 
-        On public datasets: GeoGLUE: beam 6000-4000-4000-1000
-            Total search time of all threads: 683.43s, Query Per Second: 29.2641(v17), 24.2718(v18)
-            =============== Intermediate Recall Scores ==============
-            0.908900        0.839600        0.786750                    (GeoBloom v19 no context)
-            0.919650        0.861850        0.803650                    (GeoBloom v19)*
-            ====================== Evaluation =======================
-            Recall@20        Recall@10       NDCG@5          NDCG@1
-            0.764550        0.736650        0.610570        0.513950    (GeoBloom v19 no context)
-            0.792250        0.762950        0.634941        0.534300    (GeoBloom v19)*
-            0.735700        0.701200        0.579700        0.484800    (Best Baseline TkQ-DPR_D)
-            =========================================================
 
-        The model structure and the performance is good enough for a new paper.
-        We will now start the paper writing process and use a better CPU for single-thread speed testing.
 
-        DATE: 2024-01-09
+
 
 '''
 import os
+import time
+import math
 import random
 import torch
 import struct
@@ -297,6 +269,9 @@ class GeoBloom(nn.Module):
         self.c = nn.Linear(depth, 1, bias=False)
         self.d = nn.Linear(depth, 1, bias=False)
 
+        # v20: Inverse document frequency (IDF) for Bloom filter bits.
+        self.idf_vec = nn.Linear(1, NUM_SLICES * NUM_BITS, bias=False)
+
         # Initialize all decoder weights to 0.0 at the last layer, i.e., Zero-Projection
         for i in range(depth):
             nn.init.zeros_(self.rank[2 * i + 1].weight)
@@ -307,7 +282,10 @@ class GeoBloom(nn.Module):
         nn.init.ones_(self.a.weight)
         nn.init.zeros_(self.b.weight)
         nn.init.ones_(self.c.weight)
-        nn.init.zeros_(self.d.weight)
+        nn.init.ones_(self.d.weight)
+        
+        # When not used, the IDF should be all ones.
+        nn.init.ones_(self.idf_vec.weight)
 
         weight_bound = quantized_one / weight_scale
         self.weight_bound = weight_bound
@@ -326,6 +304,9 @@ class GeoBloom(nn.Module):
                     {'params' : [layer[i].weight], 'min_weight' : -weight_bound, 'max_weight' : weight_bound }
                 )
     
+    @torch.no_grad()
+    def set_idf_vec(self, idf_vec):
+        self.idf_vec.weight[:,0] = idf_vec
 
     @torch.no_grad()
     def quantize_test(self):
@@ -394,6 +375,9 @@ class GeoBloom(nn.Module):
         buf.extend(serializer_float(self.c.weight))
         buf.extend(serializer_float(self.d.weight))
 
+        # the idf vec
+        buf.extend(serializer32(self.idf_vec.weight))
+
         # write the binary buffer into file
         with open(path, 'wb') as f:
             f.write(buf)
@@ -455,7 +439,7 @@ class GeoBloom(nn.Module):
         hidden_rank_splits = torch.chunk(hidden_rank, num_chunks, dim=-1)
         weight_rank_splits = torch.chunk(self.rank_list[2 * depth + 1].weight.T, num_chunks, dim=0)
         hidden_rank = [self.leaky_relu(h_split.matmul(w_split)) for h_split, w_split in zip(hidden_rank_splits, weight_rank_splits)]
-        hidden_rank = sum(hidden_rank) + 1
+        hidden_rank = sum(hidden_rank) + self.idf_vec.weight.reshape(1, 1, -1)
         del hidden_rank_splits, weight_rank_splits
         intersection = torch.mul(query_bloom_filter.unsqueeze(1), node_bloom_filter)
         text_score = torch.sum(hidden_rank * intersection, dim=-1)
@@ -466,7 +450,7 @@ class GeoBloom(nn.Module):
         hidden_context_select_splits = torch.chunk(hidden_context_select, num_chunks, dim=-1)
         weight_context_select_splits = torch.chunk(self.context_select_list[2 * depth + 1].weight.T, num_chunks, dim=0)
         hidden_context_select = [F.relu(h_split.matmul(w_split) + 1e-6) for h_split, w_split in zip(hidden_context_select_splits, weight_context_select_splits)]
-        hidden_context_select = sum(hidden_context_select) + 1
+        hidden_context_select = sum(hidden_context_select) + self.idf_vec.weight.reshape(1, 1, -1)
         del hidden_context_select_splits, weight_context_select_splits
         context_select_score = torch.sum(hidden_context_select * intersection, dim=-1)
         final_context_select_score = context_select_score
@@ -977,6 +961,7 @@ if __name__ == '__main__':
     # Initialize the model
     tree = BloomFilterTree(dataset, poi_dataset.poi_bloom_filters, poi_dataset.poi_locs)
     model = GeoBloom(depth=tree.depth).cuda()
+    model.set_idf_vec(tree.compute_idf_vec())
     model = torch.compile(model)
     if 'GeoGLUE' in dataset:
         learning_rate = 5e-4

@@ -34,13 +34,14 @@ Thumbs.db
 
 # Large data files and sensitive/ignored data
 *.nfs*
+backup/
 data/
 ckpt/
-data_bin/MeituanBeijing/
-data_bin/MeituanShanghai/
-data_bin/GeoGLUE/
-data_bin/GeoGLUE_clean/
+data_bin/
 model/tmp/
-nnue/nnue_v19
-nnue/nnue_v19_uncompress
+nnue/v19/nnue
+nnue/v19/nnue_uncompressed
+nnue/v19/nnue_unsupervised
+nnue/v20/
 result/*.npy
+debug/

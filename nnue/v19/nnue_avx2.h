@@ -211,8 +211,6 @@ public:
         for (uint32_t i = 0; i < num_rows; ++i) {
             bloom_filters[i].resize(bloom_filter_lengths[i]);
             file.read(reinterpret_cast<char*>(bloom_filters[i].data()), bloom_filter_lengths[i] * sizeof(uint16_t));
-            // sort the bloom filter for fast intersection calculation at leaf nodes
-            sort(bloom_filters[i].begin(), bloom_filters[i].end());
         }
 
         locations.resize(num_rows);
@@ -711,6 +709,11 @@ public:
                     i++;
                 }
             }
+            while (j < query_length){
+                *unmatched_bits = query_numbers[j];
+                unmatched_bits++;
+                j++;
+            }
         }
         // calculate and write the unmatched bits length
         unmatched_bits_length = query_length - common_bits;
@@ -950,6 +953,8 @@ public:
         memset(leaf_nodes, 0, sizeof(TreeNode) * poi.num_rows);
 
         for (uint32_t i = 0; i < poi.num_rows; ++i) {
+            // sort the bloom filter for fast intersection calculation at leaf nodes
+            sort(poi.bloom_filters[i].begin(), poi.bloom_filters[i].end());
             leaf_nodes[i].set_leaf_node(poi.bloom_filters[i], poi.locations[i], i);
         }
         this->levels.push_back(leaf_nodes);

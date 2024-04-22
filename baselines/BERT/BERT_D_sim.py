@@ -94,7 +94,9 @@ for i in trange(test_embeddings.size(0)):
     # Concatenate the results from all batches
     all_cosine_sims = torch.cat(all_cosine_sims, dim=0)
     desc_sim = all_cosine_sims
-    desc_sim = desc_sim / torch.max(desc_sim)
+    # Normalize the desc_sim to be consistent with our paper.
+    # Be aware of the zero division bug.
+    desc_sim = desc_sim / (torch.max(desc_sim) + 1e-6)
 
     query_loc = query_locations[i]
     # First compute the distance similarity

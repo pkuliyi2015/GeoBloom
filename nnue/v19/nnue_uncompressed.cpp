@@ -1,10 +1,13 @@
-// -------------------------------------------------
+// --------------------------------------------------------------------
 // GeoBloom search engine
 // Corresponding to python geobloom_v{VERSION}.py
-// Will do modularized design in the future
-// -------------------------------------------------
+// Will do modularized design when release
+// v19_uncompressed: This version is specially written for faster speed,
+// where all node bloom filters are int[1024]. It takes 4x more memory 
+// but 25% faster than the paper version.
+// --------------------------------------------------------------------
 
-#include "nnue_avx2_19.h"
+#include "nnue_avx2_uncompressed.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -394,7 +397,8 @@ int main(int argc, char *argv[]) {
     // Construct the tree
     Tree * tree = new Tree(poi, levels, nnue->depth);
     tree->load_embeddings(node_path);
-    tree->prune_bits();
+    // tree->prune_bits();
+
     // Task 1: Speed test
     if (task == "speed"){
         test.load(test_path);

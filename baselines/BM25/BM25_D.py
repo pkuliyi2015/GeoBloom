@@ -108,6 +108,9 @@ for index, query in enumerate(tqdm(query_txt)):
     dist_sim = 1 - dist_sim / d_norm
     # Then compute the description similarity
     desc_sim = torch.from_numpy(all_scores[index]).cuda().float()
+    # Normalize it to be consistent with the paper.
+    # Be aware of the zero division bugs.
+    desc_sim = desc_sim / (torch.max(desc_sim) +1e-6)
     # desc_sim = desc_sim
     # Combine the two
     predict_score = (1 - alpha) * dist_sim + alpha * desc_sim
