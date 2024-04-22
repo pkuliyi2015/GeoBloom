@@ -36,7 +36,7 @@ Our methods required:
 
 - Clone this repository.
 - Unzip the GeoGLUE_clean.zip in the data folder. 
-  - GeoGLUE is too large to be include in this repo directly.
+  - GeoGLUE is too large to be include in this anonymized repo directly.
   - You can either process it on you own, or wait for us to release the GoogleDrive.
 
 
@@ -91,13 +91,12 @@ Note:
 
 - The intermediate recall scores shows the recall rates of beam search at each tree depth. It gives insights on the beam width selection.
 - We support multi-threading (8 threads in the above example) for your convenience, but the QPS is always evaluated per thread.
-- The evaluation uses the same metrics as in the paper, but the inference here is conducted on AMD Ryzen Threadripper PRO 5965WX 24-Cores as our Intel i9-10900K is busy.
 - Here, we simply choose an equal beam-width (e.g., 4000) and it can be quite "slow". You can set different beam widths at each tree levels to obtain faster speed.
 
 
 ### Supervised Effectiveness
 
-The training requires an NVIDIA GPU. We trained on A6000 24GB / NVIDIA V100 32GB, both can run the script smoothly.
+The training requires an NVIDIA GPU. We tested on A6000 24GB / NVIDIA V100 32GB, both can run the script without issues.
 
 #### Steps:
 
@@ -203,12 +202,12 @@ Total - 553.16
 - You can quickly evaluate all baselines versus our method, but these methods require additional packages (jieba, acceleration, transformers,...)
 - We strictly conduct experiments without any cherry-picking, so the result should be very close to that reported in our paper. 
   - You need OpenAI key for the OpenAI baseline, and it will cost around $2. We use the API on March 3th, 2024. Until that time, it was still not as competitive as BM25 on the provided datasets.
-  - BM25_D's performance can be slightly enhanced with specialized tokenizer. We now use the latest *jieba Chinese segmentation library* and *jieba.lcut_for_search* function, as it can be much faster and better (1~2%, which won't affect our analysis).
+  - BM25_D's performance is slightly enhanced with a specialized tokenizer *jieba Chinese text segmentation library* and *jieba.lcut_for_search* function.
   - DPR_D requires negative sampling. We use the BM25_D to generate hard negative samples for it.
 
 ## Future Development
 
-- Currently, the training is 1000x slower than the inference, as we treat Bloom filters as dense vectors and only rely on PyTorch torch.compile for acceleration. It should be much faster if we implement custom CUDA kernels. But this comes with heavy workload.
+- Currently, the training is significantly slower than the inference, as we treat Bloom filters as dense vectors and only rely on PyTorch torch.compile for acceleration. It should be much faster if we implement custom CUDA kernels.
 
 - Sophisticated Bloom filters and index design can be applied to this framework to achieve better space efficiency, making it possible to deploy as offline map apps.
 
