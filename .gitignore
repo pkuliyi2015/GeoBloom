@@ -34,9 +34,9 @@ Thumbs.db
 
 # Large data files and sensitive/ignored data
 *.nfs*
-backup/
 data/
 ckpt/
+model/geobloom_v20.py
 data_bin/
 model/tmp/
 nnue/v19/nnue
