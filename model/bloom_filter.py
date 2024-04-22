@@ -108,7 +108,7 @@ def load_data(file_dir, is_query=True):
     with open(file_dir, 'r') as f:
         lines = f.readlines()
         for line in tqdm(lines, desc='Loading '+ ('query' if is_query else 'POI') + ' data'):
-            line = line.strip().split('\t')
+            line = line.strip().lower().split('\t')
             # Avoid mixing the fields in POIs. This helps to reduce the size of POI bloom filters.
             if not is_query:
                 fields = set(line[0].split(','))

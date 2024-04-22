@@ -951,8 +951,9 @@ if __name__ == '__main__':
             print('Cannot find the depth of the model in the checkpoint.')
             exit()
         model.load_state_dict(ckpt)
-        model.serialize(nnue_path if task != 'size_test' else f'data_bin/{dataset}/nnue_v{VERSION}_size_test.bin')
-        print(f'Quantized model saved to {nnue_path}')
+        save_path = nnue_path if task != 'size_test' else f'data_bin/{dataset}/nnue_v{VERSION}_size_test.bin'
+        model.serialize(save_path, size_test= task == 'size_test')
+        print(f'Quantized model saved to {save_path}')
         if task == 'quantize':
             exit()
 
@@ -1037,10 +1038,59 @@ if __name__ == '__main__':
             # In the paper we compare with int16 embeddings. As the embedding dim=32, the size differences are small.
             # We will further adjust the C++ engine to support int16 embeddings.
             node_representations = np.vstack(node_representations).astype(np.int16)
-            node_path = f'data_bin/{dataset}/node_v{VERSION}.bin'
+            node_path = f'data_bin/{dataset}/node_v{VERSION}_size_test.bin'
 
         with open(node_path, 'wb') as f:
             f.write(node_representations.tobytes())
         print(f'Node representations saved to {node_path}')
+
+        if task == 'size_test':
+            # Measure and print the size of each file:
+            bin_path = f'data_bin/{dataset}/'
+            model_path = os.path.join(bin_path,f'nnue_v{VERSION}_size_test.bin')
+            embedding_path = os.path.join(bin_path,f'node_v{VERSION}_size_test.bin')
+            bloom_path = os.path.join(bin_path,f'poi.bin')
+            tree_path = os.path.join(bin_path,f'tree.bin')
+            # Helper function to convert bytes to megabytes with two decimal places
+            def convert_size_to_mb(size_bytes):
+                # Convert from bytes to megabytes and format the number with two decimals
+                size_mb = size_bytes / (1024 * 1024)
+                return f"{size_mb:.2f}"
+
+            # Dictionary to store file sizes in MB
+            file_sizes = {
+                "Model": [],
+                "Embeddings": [],
+                "Bloom Filters": [],
+                "Tree": []
+            }
+
+            # List of file paths for easier iteration
+            file_paths = [model_path, embedding_path, bloom_path, tree_path]
+            total_size = 0
+            # Compute file sizes
+            for path in file_paths:
+                if os.path.exists(path):
+                    size = os.path.getsize(path)
+                    total_size += size / (1024 * 1024)
+                    if "nnue" in path:
+                        file_sizes["Model"].append(convert_size_to_mb(size))
+                    elif "node" in path:
+                        file_sizes["Embeddings"].append(convert_size_to_mb(size))
+                    elif "poi" in path:
+                        file_sizes["Bloom Filters"].append(convert_size_to_mb(size))
+                    elif "tree" in path:
+                        file_sizes["Tree"].append(convert_size_to_mb(size))
+                else:
+                    print(f"File not found: {path}")
+
+            # Printing the sizes in the specified format
+            print('======== File Sizes in MB ========')
+            print('Components')
+            for key, sizes in file_sizes.items():
+                print(f"{key:<15} {' '.join(sizes)}")
+            print(f'Total - {total_size:.2f}')
+            print('==================================')
+
 
 
