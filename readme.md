@@ -3,7 +3,7 @@
 - This is the official repository of the paper:  *GeoBloom: Revitalizing Lightweight Models for Geographic Information Retrieval*
 
 ## Update
-- We found that Anonymous GitHub has a serious bug, which doesn't sync nested folder (nnue/v19/) in our repo. Hence, we upload the NNUE engine into the nnue/ folder. Please manually copy them to nnue/v19/ folder for reproduction.
+- We found that Anonymous GitHub has a serious bug, which doesn't sync nested folder (nnue/v19/) in our repo. We now manually fixed the bug by adding a placeholder file.
 
 ## Quick Start
 
