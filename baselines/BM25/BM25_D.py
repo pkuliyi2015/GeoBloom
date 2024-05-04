@@ -27,7 +27,7 @@ num_threads = args.threads
 
 processed_path = f'data/{dataset}'
 processed_poi_file = processed_path + '/poi.txt'
-processed_query_file = processed_path + '/test.txt'
+processed_query_file = processed_path + '/test_anchor.txt'
 
 query_txt = []
 query_locations = []

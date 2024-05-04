@@ -46,9 +46,9 @@ def evaluate(top100, truths, metrics):
 if __name__ == '__main__':
 
     datasets = [
-        'MeituanBeijing',
-        'MeituanShanghai',
-        'GeoGLUE',
+        # 'MeituanBeijing',
+        # 'MeituanShanghai',
+        # 'GeoGLUE',
         'GeoGLUE_clean',
     ]
     metrics = {
@@ -75,7 +75,7 @@ if __name__ == '__main__':
     ]
     for dataset in datasets:
         query_truth = []
-        with open(f'data/{dataset}/test.txt', 'r') as f:
+        with open(f'data/{dataset}/test_anchor.txt', 'r') as f:
             for line in f:
                 line = line.strip().split('\t')
                 query_truth_str = line[3]

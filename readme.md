@@ -2,6 +2,8 @@
 
 - This is the official repository of the paper:  *GeoBloom: Revitalizing Lightweight Models for Geographic Information Retrieval*
 
+## Update
+- We found that Anonymous GitHub has a serious bug, which doesn't sync nested folder (nnue/v19/) in our repo. Hence, we upload the NNUE engine into the nnue/ folder. Please manually copy them to nnue/v19/ folder for reproduction.
 
 ## Quick Start
 
@@ -234,9 +236,9 @@ GeoBloom
 |	└── train_portion.py === Split the training data into various portions.
 ├── nnue  === The native inference engine implemented in C++
 |	└── v19
-|	    ├── nnue_avx2.h  === The header file for essential data structures and NNUE engine.
+|	  ├── nnue_avx2.h  === The header file for essential data structures and NNUE engine.
 |		├── nnue.cpp  === The main executable source file.
-|	    ├── nnue_avx2_unsupervised.h  === unsupervised version.
+|	  ├── nnue_avx2_unsupervised.h  === unsupervised version.
 |		└── nnue_unsupervised.cpp === unsupervised version.
 ├── result
 |	└── evaluation.py  === A simple script for evaluating the outcomes of baselines
