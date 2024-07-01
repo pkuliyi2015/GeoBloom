@@ -546,6 +546,9 @@ public:
         constexpr int num_chunks = MAX_AVX2_REGISTERS;
         alignas (64) int32_t buffer[256];
         int normalization = bloom_filter.size(); // In our case, it always > 0
+        if (normalization == 0){
+            normalization = 1;
+        }
         alignas (64) int bound = normalization * 127;
         __m256i regs[num_chunks];
         

@@ -4,7 +4,7 @@ from tqdm import trange
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset', type=str, default='GeoGLUE')
+parser.add_argument('--dataset', type=str, default='GeoGLUE_clean')
 parser.add_argument('--portion', type=str, default='0.7')
 
 dataset = parser.parse_args().dataset
@@ -30,7 +30,7 @@ test_embeddings = torch.tensor(test_embeddings, dtype=torch.float16).cuda()
 # We also consider the distance. It needs to be loaded from the file, and normalized.
 
 processed_poi_file = processed_path + '/poi.txt'
-processed_query_file = processed_path + '/test.txt'
+processed_query_file = processed_path + '/test_anchor.txt'
 
 
 query_txt = []

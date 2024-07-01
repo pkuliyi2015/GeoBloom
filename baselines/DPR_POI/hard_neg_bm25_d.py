@@ -2,7 +2,7 @@
     This script reuse the BM25-D method to generate hard negatives for the DPR model.
 '''
 import os
-import jieba
+import jieba_fast
 import torch
 
 import numpy as np
@@ -51,9 +51,10 @@ poi_txt = []
 poi_locations = []
 # get the max and min of the utm coordinates
 with open(processed_poi_file, 'r') as f:
-    for line in f:
+    lines = f.readlines()
+    for line in tqdm(lines, desc='Splitting input text'):
         line = line.strip().split('\t')
-        poi_txt.append(jieba.lcut_for_search(line[0]))
+        poi_txt.append(jieba_fast.lcut_for_search(line[0]))
         poi_utm_lat = float(line[1])
         poi_utm_lon = float(line[2])
         poi_locations.append([poi_utm_lat, poi_utm_lon])
@@ -72,7 +73,7 @@ from rank_bm25 import BM25Okapi
 bm25 = BM25Okapi(poi_txt, k1=0.3, b=0.1)
 
 def bm25_search(query):
-    tokenized_query = jieba.lcut_for_search(query)
+    tokenized_query = jieba_fast.lcut_for_search(query)
     doc_scores = bm25.get_scores(tokenized_query)
     return doc_scores.astype(np.uint8)
 

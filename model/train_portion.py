@@ -28,6 +28,7 @@ with open(train_path, 'r') as f:
 random.seed(0)
 random.shuffle(lines)
 
+# gradually uses more queries
 for portion in portions:
     portion_lines = int(total_lines * portion)
     portion_file = portion_path + 'train_' + str(portion) + '.txt'

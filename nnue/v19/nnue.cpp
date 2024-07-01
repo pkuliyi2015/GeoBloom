@@ -422,6 +422,10 @@ int main(int argc, char *argv[]) {
         multi_thread_speed_test(num_threads, nnue, tree, dev, beam_width, dataset_path + "dev_top200.bin");
         cout << "Searching test candidates..." << endl;
         multi_thread_speed_test(num_threads, nnue, tree, test, beam_width, dataset_path + "test_top200.bin");
+    }else if (task == "pause"){
+        // pause the program so that you can measure its memory usage via htop.
+        printf("Paused. Press any button to exit.");
+        char c = getchar();
     }
     
     delete tree;

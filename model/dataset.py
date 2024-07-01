@@ -207,7 +207,7 @@ if __name__ == '__main__':
 
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default='GeoGLUE_clean')
+    parser.add_argument('--dataset', type=str, default='MeituanBeijing')
     parser.add_argument('--portion', type=str, default='1')
 
     args = parser.parse_args()

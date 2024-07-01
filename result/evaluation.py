@@ -47,9 +47,9 @@ if __name__ == '__main__':
 
     datasets = [
         'MeituanBeijing',
-        'MeituanShanghai',
-        'GeoGLUE',
-        'GeoGLUE_clean',
+        # 'MeituanShanghai',
+        # 'GeoGLUE',
+        # 'GeoGLUE_clean',
     ]
     metrics = {
         # 'Recall @ 1000': lambda p, t: recall(p, t, 1000),
@@ -60,14 +60,14 @@ if __name__ == '__main__':
 
     }
     models = [
-        'BM25',
+        # 'BM25',
         'BM25_D',
-        'BERT',
-        'BERT_D',
-        'OpenAI',
-        'OpenAI_D',
-        'DPR',
-        'DPR_D',
+        # 'BERT',
+        # 'BERT_D',
+        # 'OpenAI',
+        # 'OpenAI_D',
+        # 'DPR',
+        # 'DPR_D',
     ]
 
     portions = [

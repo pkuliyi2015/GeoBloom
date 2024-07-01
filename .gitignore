@@ -35,6 +35,9 @@ Thumbs.db
 # Large data files and sensitive/ignored data
 *.nfs*
 data/
+baselines/DPR_POI/wandb/
+baselines/DPR_POI/embeddings/
+baselines/DPR_POI/hard_negatives/
 ckpt/
 model/geobloom_v20.py
 data_bin/

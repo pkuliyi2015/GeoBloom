@@ -37,7 +37,7 @@ def parse_args():
     import argparse
     parser = argparse.ArgumentParser()
     ## adding args here for more control from CLI is possible
-    parser.add_argument("--config_file",default='config/train_dpr_geoglue_clean.yaml')
+    parser.add_argument("--config_file", default='config/train_dpr_geoglue_clean0.05.yaml')
     args = parser.parse_args()
 
     yaml_config = get_yaml_file(args.config_file)

@@ -7,6 +7,7 @@
 import math
 import hashlib
 import xxhash
+import jieba_fast
 
 from tqdm import tqdm
 from struct import pack, unpack
@@ -86,7 +87,36 @@ def make_hashfuncs(num_slices, num_bits):
 
     return _hash_maker, hashfn
 
-def load_data(file_dir, is_query=True):
+def letter_split(text, n=2):
+    ngrams = set()
+    for i in range(len(text) - n + 1):
+        ngrams.add(text[i:i + n])
+    return ngrams
+
+def ngram_split(text, n=3):
+    ngrams = set()
+    for k in range(1, n + 1):
+        for i in range(len(text) - k + 1):
+            ngrams.add(text[i:i + k])
+    return ngrams
+
+def hybrid_split(text):
+    # We don't segment the address into 2-gram. 
+    # The address (fields[2]) is only cut by jieba_fast to mitigate unexpected split.
+    fields = text.split(',')
+    tokens = ngram_split(fields[0], 2)
+    if len(fields) > 1:
+        tokens.update(ngram_split(fields[1], 2))
+    for field in fields:
+        tokens.update(jieba_fast.lcut_for_search(field))
+    return tokens
+
+def query_split(text):
+    tokens = ngram_split(text, 2)
+    tokens.update(jieba_fast.lcut_for_search(text))
+    return tokens
+
+def load_data(file_dir, is_query=True, query_tokenizer=query_split, poi_tokenizer=hybrid_split):
     bloom_filters = []
     locs = []
     truths = []
@@ -98,25 +128,21 @@ def load_data(file_dir, is_query=True):
             hash_list[i] += i * NUM_BITS
         return set(hash_list)
     
-    def ngram_split(text, n=3):
-        ngrams = set()
-        for k in range(1, n + 1):
-            for i in range(len(text) - k + 1):
-                ngrams.add(text[i:i + k])
-        return ngrams
-    
-    with open(file_dir, 'r') as f:
+    with open(file_dir, 'r',) as f:
         lines = f.readlines()
         for line in tqdm(lines, desc='Loading '+ ('query' if is_query else 'POI') + ' data'):
             line = line.strip().lower().split('\t')
-            # Avoid mixing the fields in POIs. This helps to reduce the size of POI bloom filters.
-            if not is_query:
-                fields = set(line[0].split(','))
-                text = set()
-                for field in fields:
-                    text.update(ngram_split(field))
+            # if not is_query:
+            #     fields = set(line[0].split(','))
+            #     text = set()
+            #     for field in fields:
+            #         text.update(ngram_split(field))
+            # else:
+            #     text = ngram_split(line[0])
+            if is_query:
+                text = query_tokenizer(line[0])
             else:
-                text = ngram_split(line[0])
+                text = poi_tokenizer(line[0])
             bloom_filter = set()
             for t in text:
                 bloom_filter.update(hash_func(t))
