@@ -47,9 +47,9 @@ if __name__ == '__main__':
 
     datasets = [
         'MeituanBeijing',
-        # 'MeituanShanghai',
-        # 'GeoGLUE',
-        # 'GeoGLUE_clean',
+        'MeituanShanghai',
+        'GeoGLUE',
+        'GeoGLUE_clean',
     ]
     metrics = {
         # 'Recall @ 1000': lambda p, t: recall(p, t, 1000),
@@ -75,7 +75,7 @@ if __name__ == '__main__':
     ]
     for dataset in datasets:
         query_truth = []
-        with open(f'data/{dataset}/test.txt', 'r') as f:
+        with open(f'data/{dataset}/test_anchor.txt', 'r') as f:
             for line in f:
                 line = line.strip().split('\t')
                 query_truth_str = line[3]
