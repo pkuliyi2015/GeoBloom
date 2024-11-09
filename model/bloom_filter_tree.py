@@ -3,15 +3,15 @@ import math
 import torch
 import struct
 
-from kmeans_tree import build_kmeans_tree
 from tqdm import tqdm, trange
 from typing import List
 
-from bloom_filter import NUM_BITS, NUM_SLICES
+from dataset import POIDataset
+from kmeans_tree import build_kmeans_tree
 
 class TreeNode:
-    def __init__(self, bloom_filter, location, child=None, parent=None, poi_idx=None):
-        self.bloom_filter: set = bloom_filter
+    def __init__(self, bloom_filter, location, child=None, parent=None, id_in_level=None):
+        self.bloom_filter: set = bloom_filter if isinstance(bloom_filter, set) else set(bloom_filter)
         self.location: list = location
         if len(location) == 2:
             self.max_x: float = location[0]
@@ -27,11 +27,7 @@ class TreeNode:
         self.radius: float = 0
         self.child: List[TreeNode] = child
         self.parent: TreeNode = parent
-        self.poi_idx: int = poi_idx
-
-        self.torch_bloom_filter: torch.Tensor = None
-        self.torch_location: torch.Tensor = None
-        self.torch_radius: torch.Tensor = None
+        self.id_in_level: int = id_in_level
 
     def add_child(self, child):
         self.bloom_filter.update(child.bloom_filter)
@@ -53,21 +49,24 @@ class TreeNode:
     
 
 class BloomFilterTree:
-    def __init__(self, dataset, poi_bloom_filters, poi_locs, width=8) -> None:
-        self.dataset = dataset
+    def __init__(self, poi_dataset: POIDataset, width, depth=4) -> None:
+        self.dataset_name: str = poi_dataset.dataset_name
+        self.bloom_filter_dim: int = poi_dataset.num_slices * poi_dataset.num_bits
+        assert self.bloom_filter_dim <= 32768
         self.levels: List[List[TreeNode]] = []
         self.leaf_nodes: List[TreeNode] = []
         self.width: int = width
-        self.num_nodes: int = len(poi_bloom_filters)
+        self.num_nodes: int = len(poi_dataset.poi_bloom_filters)
 
-        for i in range(len(poi_bloom_filters)):
-            self.leaf_nodes.append(TreeNode(poi_bloom_filters[i], poi_locs[i], poi_idx=i))
+        for i in range(len(poi_dataset.poi_bloom_filters)):
+            # The id_in_level for leaf nodes is the index of the poi in the poi_dataset
+            self.leaf_nodes.append(TreeNode(poi_dataset.poi_bloom_filters[i], poi_dataset.poi_locs[i], id_in_level=i))
 
         self.levels.insert(0, self.leaf_nodes)
 
         print('Building the bloom filter tree...')
-        if not os.path.exists(f'data_bin/{dataset}/tree.bin'):
-            cluster_by_layers = build_kmeans_tree(dataset, poi_locs, width=width)
+        if not os.path.exists(f'data_bin/{self.dataset_name}/tree.bin'):
+            cluster_by_layers = build_kmeans_tree(self.dataset_name, poi_dataset.poi_locs, width=width)
             self.serialize(cluster_by_layers)
         else:
             cluster_by_layers = self.deserialize()
@@ -79,57 +78,58 @@ class BloomFilterTree:
             self.levels.insert(0, current_level)
             prev_level = current_level
 
-        # Remove the first several levels
-        if dataset == 'MeituanBeijing':
-            first_level_width = 50
-        elif dataset == 'MeituanShanghai':
-            first_level_width = 200
-        elif dataset == 'GeoGLUE':
-            first_level_width = 4000
-        elif dataset == 'GeoGLUE_clean':
-            first_level_width = 1000
-        else:
-            raise NotImplementedError
-
-        truncate_index = 0
-        for i in range(len(self.levels)):
-            if len(self.levels[i]) > first_level_width:
-                truncate_index = i
-                break
-        self.levels = self.levels[truncate_index:]
+        self.levels = self.levels[len(self.levels) - depth:]
         self.depth = len(self.levels)
         self.init_candidates = self.levels[0]
         for node in self.init_candidates:
             node.parent = None
 
-        # Transfer to gpu to save time (Abandoned as we always infer nodes for nnue engine)
-        # if 'Meituan' in dataset:
-        tbar = tqdm(total=self.num_nodes, desc='Moving bloom filters to GPU')
+        # show the max number of child node in the second-last level
+        print(f'The max number of child node in the second-last level: {max([len(node.child) for node in self.levels[-2]])}')
 
-        def move_to_gpu(node: TreeNode):
-            node.torch_bloom_filter = torch.tensor(list(node.bloom_filter), dtype=torch.int16, device='cuda')
-            node.torch_location = torch.tensor(node.location, dtype=torch.float32, device='cuda') 
-            node.torch_radius = torch.tensor(node.radius, dtype=torch.float32, device='cuda')
-            tbar.update(1)
-            if node.child is not None:
-                for child in node.child:
-                    move_to_gpu(child)
+        self.sparse_levels = []
+        self.dense_levels = []
+        self.location_levels = []
+        self.radius_levels = []
 
-        for node in self.init_candidates:
-            move_to_gpu(node)
-        tbar.close()
+    def prepare_tensors(self):
+        sparse_level_num = 0
+        dense_level_num = 0
+        for level in tqdm(self.levels, desc='Preparing Bloom Filter Tensors'):
+            num_bits = [len(node.bloom_filter) for node in level]
+            max_bits = max(num_bits)
+            avg_bits = sum(num_bits) / len(num_bits)
+            loc = []
+            rad = []
+            if avg_bits / self.bloom_filter_dim > 0.05:
+                dense_tensor = torch.zeros(len(level), self.bloom_filter_dim + 1, dtype=torch.float16)
+                sparse_tensor = None
+                dense_level_num += 1
+            else:
+                sparse_tensor = torch.empty(len(level), max_bits, dtype=torch.int16)
+                dense_tensor = None
+                sparse_level_num += 1
+            for row_idx, node in enumerate(level):
+                if avg_bits / self.bloom_filter_dim > 0.05:
+                    # If the bloom filter is denser than 10%, we also build a dense tensor to store it
+                    dense_tensor[row_idx, list(node.bloom_filter)] = 1
+                else:
+                    sorted_idx = sorted(list(node.bloom_filter))
+                    sparse_tensor[row_idx, :len(sorted_idx)] = torch.tensor(sorted_idx, dtype=torch.int16)
+                    sparse_tensor[row_idx, len(sorted_idx):] = -1
+                loc.append(node.location)
+                rad.append(node.radius)
 
-        self.init_bloom_filter, self.init_loc, self.init_radius = self.collate_nodes(self.init_candidates)
-
-    def compute_idf_vec(self):
-        idf_vec = torch.zeros((NUM_BITS * NUM_SLICES), device='cuda')
-        for node in self.leaf_nodes:
-            idf_vec[node.torch_bloom_filter.long()]+=1
-        idf_vec = torch.log(len(self.leaf_nodes)/(idf_vec + 1))
-        return idf_vec
+            loc = torch.tensor(loc, dtype=torch.float32)
+            rad = torch.tensor(rad, dtype=torch.float32)
+            self.sparse_levels.append(sparse_tensor)
+            self.location_levels.append(loc)
+            self.radius_levels.append(rad)
+            self.dense_levels.append(dense_tensor)
+        print(f'Dense levels: {dense_level_num}, Sparse levels: {sparse_level_num}')
 
     def serialize(self, levels):
-        with open(f'data_bin/{self.dataset}/tree.bin', 'wb') as f:
+        with open(f'data_bin/{self.dataset_name}/tree.bin', 'wb') as f:
             f.write(struct.pack('I', len(levels)))
             for level in levels:
                 f.write(struct.pack('I', len(level)))
@@ -139,7 +139,7 @@ class BloomFilterTree:
                         f.write(struct.pack('I', node_id))
 
     def deserialize(self):
-        with open(f'data_bin/{self.dataset}/tree.bin', 'rb') as f:
+        with open(f'data_bin/{self.dataset_name}/tree.bin', 'rb') as f:
             num_levels = struct.unpack('I', f.read(4))[0]
             levels = []
             for _ in range(num_levels):
@@ -157,8 +157,8 @@ class BloomFilterTree:
     
     def build_from_clusters(self, clusters, prev_level):
         current_level = []
-        for cluster in tqdm(clusters):
-            new_node = TreeNode(set(), [], [])
+        for id_in_level, cluster in enumerate(clusters):
+            new_node = TreeNode(set(), [], [], id_in_level=id_in_level)
             for node_id in cluster:
                 new_node.add_child(prev_level[node_id])
             new_node.compute_radius()
@@ -174,37 +174,21 @@ class BloomFilterTree:
             current_node = current_node.parent
         return path
     
-    def collate_nodes(self, node_list: List[TreeNode]):
-        node_bloom_filter_list = [node.torch_bloom_filter for node in node_list]
-        node_col = torch.hstack(node_bloom_filter_list)
-        node_row = torch.repeat_interleave(torch.arange(len(node_bloom_filter_list), dtype=torch.int16, device='cuda'), torch.tensor([x.shape[0] for x in node_bloom_filter_list], device='cuda'))
-        node_values = torch.ones_like(node_col, dtype=torch.float16, device='cuda')
-        node_idx = torch.vstack([node_row, node_col])
-        node_bloom_filter = torch.sparse_coo_tensor(node_idx, node_values, (len(node_bloom_filter_list), NUM_SLICES * NUM_BITS), check_invariants=False)
-        node_bloom_filter._coalesced_(True)
-        # collate locations
-        node_loc_list = [node.torch_location for node in node_list]
-        node_loc = torch.vstack(node_loc_list)
-        # collate node radius
-        node_radius_list = [node.torch_radius for node in node_list]
-        node_radius = torch.vstack(node_radius_list)
-        return node_bloom_filter, node_loc, node_radius
-    
-    def load_candidates(self, file_path, num_rows, beam_widths, topk=20):
+    def load_candidates(self, file_path, num_rows, beam_widths):
         '''
             This function is used to deserialize the candidates from the C++ inference engine.
             The bin file: [query_id][depth][beam_width], unsigned int32
             candidates: [depth][query_id][beam_width]
         '''
         if not isinstance(beam_widths, list):
-            beam_widths = [beam_widths] * (self.depth + 1)
-        candidates = [[[] for i in range(num_rows)] for j in range(self.depth - 1)]
+            beam_widths = [beam_widths] * (self.depth)
+        candidates = [[None for i in range(num_rows)] for j in range(self.depth)]
         topk_list = [[] for _ in range(num_rows)]
         with open(file_path, 'rb') as f:
             for query_id in trange(num_rows, desc='Deserializing candidates'):
-                for depth in range(1, self.depth):
-                    beam_width = beam_widths[depth]
-                    for node_idx in struct.unpack(f'{beam_width}I', f.read(beam_width * 4)):
-                        candidates[depth-1][query_id].append(self.levels[depth][node_idx])
-                topk_list[query_id] = list(struct.unpack(f'{topk}I', f.read(topk * 4)))
+                for depth in range(self.depth):
+                    beam_width = min(beam_widths[depth], len(self.levels[depth]))
+                    node_list = struct.unpack(f'{beam_width}I', f.read(beam_width * 4))
+                    candidates[depth][query_id] = node_list
+                topk_list[query_id] = candidates[self.depth - 1][query_id]
         return candidates, topk_list

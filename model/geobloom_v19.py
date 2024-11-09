@@ -5,16 +5,16 @@
         - It accepts two bloom filters as input, one is from the query, the other is from the tree-node.
         - When the not trained, it should output the dot product of the two bloom filters exactly.
     
-    v3: Works well on the MeituanBeijing dataset, but fails on GeoGLUE
+    v3: Works well on the Beijing dataset, but fails on GeoGLUE
     
     v6: Try to use Listwise loss (lambdarank)
-        - Works well on MeituanBeijing
+        - Works well on Beijing
         - Interaction layer works as expected
         - Distance reweighter leads to overfitting (removed in v6 temporarily)
         
     v10 - Try the separated query rewriter
         - Separating the reranking and the retrieval process.
-        MeituanBeijing NDCG@5: 0.605
+        Beijing NDCG@5: 0.605
         GeoGLUE beam_width = 2000: 0.468
 
     v12 - Remove the query rewriter as it negatively affect the result.
@@ -32,10 +32,10 @@
         1. Try to use a unified model to do all the retrieval parts and a unique head to do the reranking part.
         2. Normalize the output of input encoding layer (avgpool) to unify the model at different depths.
         3. Use ClippedReLU instead of ReLU and limit the parameters in the optimizer.
-           - Verified successfully on both MeituanBeijing and GeoGLUE.
+           - Verified successfully on both Beijing and GeoGLUE.
 
-        4. Implement the "Eval -> Train -> Eval loop" and test the performance on MeituanBeijing.
-           - Verified successfully on MeituanBeijing.
+        4. Implement the "Eval -> Train -> Eval loop" and test the performance on Beijing.
+           - Verified successfully on Beijing.
 
         5. Ranking performance improvement
             - Truncate ranking loss to k=50 at the final depth
@@ -96,7 +96,7 @@
         TODO: Add contextual information to the model (after C++ engine works)
 
         Results: 
-        It works well on MeituanBeijing and MeituanShanghai. 
+        It works well on Beijing and Shanghai. 
             - Very fast (< 1ms each query); 
             - Much better than all methods.
         But it doesn't work well on GeoGLUE. 
@@ -144,7 +144,7 @@
 
         Experimental Results on Private Datasets, Xeon E5-2698 2.20GHz (* means the best result):
 
-            MeituanBeijing: beam 200-300-300-300
+            Beijing: beam 200-300-300-300
             Total search time of all threads: 5.88955s, Query Per Second: 1606.41 (v17), 1247.86 (v18)
             =============== Intermediate Recall Scores ==============
             0.984915        0.939978        0.874999                    (GeoBloom v19 no context)*
@@ -156,7 +156,7 @@
             0.726300        0.663300        0.505600        0.414500    (Best Baseline TkQ-DPR_D)
             =========================================================
 
-            MeituanShanghai: beam 200-400-300-300
+            Shanghai: beam 200-400-300-300
             Total search time of all threads: 12.1486s, Query Per Second: 1046.87(v17), 781.081(v18)
             =============== Intermediate Recall Scores ==============
             0.965070        0.932397        0.884622                    (GeoBloom v19 no context)*
@@ -185,9 +185,15 @@
 
         DATE: 2024-01-09
 
+    v19_new - Faster Training Speed
+        In this version, we use torch_sparse instead of vanilla torch.sparse_coo_tensor.
+        This leads to a significant speed-up in the training process.
+        Besides, we optimize the bloom filter for Beijing, Shanghai, and GeoGLUE-clean datasets.
+
 '''
+import math
 import os
-import random
+import time
 import torch
 import struct
 import subprocess
@@ -200,13 +206,13 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 from torch.cuda.amp import autocast as autocast
 from torch.cuda.amp import GradScaler
+from torch.utils.cpp_extension import load
 
-from bloom_filter import NUM_BITS, NUM_SLICES
 from bloom_filter_tree import BloomFilterTree
 from lambdarank import lambdaLoss
-from dataset import NodeEncodeDataset, POIDataset
+from dataset import POIDataset, POIRetrievalDataset
 
-# On MeituanBeijing and MeituanShanghai, all user selections are equally important, there is no ranking priority.
+# On Beijing and Shanghai, all user selections are equally important, there is no ranking priority.
 # On GeoGLUE and GeoGLUE_clean, there is only one ground truth for each query.
 # Hence, the following utility function can calculate NDCG faster than torch_metrics while with identical results.
 
@@ -229,18 +235,66 @@ VERSION = '19'
 # 4*8192 = -32767 ~ 32768 can be exactly stored with torch.int16, so it saves VRAM
 # And we can compare with other methods conveniently as they all uses fp16
 
+# Compile and load the CUDA extension with Ninja
+isin_cuda = load(
+    name="isin_cuda",
+    sources=["cuda/isin_cuda.cu"],
+    extra_cflags=['-O3'],
+    extra_cuda_cflags=['-lineinfo'],
+    verbose=True
+)
+
+def isin_cuda_wrapper(elements, test_elements, padding_idx, dense=False):
+    return isin_cuda.isin_cuda(elements, test_elements, padding_idx, dense)
+
+class FakeReLU(nn.Module):
+    def forward(self, x):
+        # silu = F.silu(x)
+        # relu = F.relu(x)
+        # # Forward is relu, backward is silu
+        # return silu + (relu - silu).detach()
+        return F.relu(x + 1e-6)
+
+class ZeroProjection(nn.Module):
+    '''
+        The nn.Embedding is too slow.
+        We use this to replace it.
+    '''
+    def __init__(self, expanded_dim, hidden_dim):
+        super(ZeroProjection, self).__init__()
+        self.expanded_dim = expanded_dim
+        self.hidden_dim = hidden_dim
+        self.weight = nn.Parameter(torch.zeros(expanded_dim, hidden_dim, dtype=torch.float32))
+
+    def forward(self, x):
+        # assert torch.all(self.weight.data[-1,:] == 0)
+        out = self.weight.index_select(0, x.reshape(-1))
+        return out.reshape(x.shape + (-1,))
+
 # Model definition
 class GeoBloom(nn.Module):
-    def __init__(self, depth=4, quantized_one=127.0, weight_scale=64.0, division_factor=16.0, d_threshold=1000.0):
+    def __init__(self, bloom_filter_dim, depth=4, quantized_one=127.0, weight_scale=64.0, division_factor=16.0, d_threshold=1000.0):
         super(GeoBloom, self).__init__()
         self.depth = depth
+        self.bloom_filter_dim = bloom_filter_dim
+        self.expanded_dim = bloom_filter_dim + 1
         self.quantized_one = quantized_one
         self.weight_scale = weight_scale
         self.d_threshold = d_threshold
 
         # We use one common encoder for all depths and both queries and nodes
         # This encoder is especially large to ensure the model's capacity.
-        self.encoder = nn.Linear(NUM_SLICES * NUM_BITS, 256)
+
+        # We follow the Stockfish NNUE initialization.
+
+        sigma = math.sqrt(1/bloom_filter_dim)
+        encoder_weight = torch.rand(self.expanded_dim, 256, dtype=torch.float32) * (2 * sigma) - sigma
+        encoder_bias = torch.rand(256, dtype=torch.float32) * (2 * sigma) - sigma
+        encoder_weight[-1, :] = 0
+
+        # Setup the embedding bag for bloom filter embedding
+        self.encoder = nn.EmbeddingBag(self.expanded_dim, 256, padding_idx=bloom_filter_dim, mode='sum', _weight=encoder_weight)
+        self.encoder_bias = nn.Parameter(encoder_bias)
 
         self.bottleneck_list = [
             nn.Linear(512, 32) for _ in range(depth)
@@ -256,7 +310,7 @@ class GeoBloom(nn.Module):
         for i in range(depth):
             self.rank_list.extend([
                 nn.Linear(32, 32),
-                nn.Linear(32, NUM_SLICES * NUM_BITS, bias=False),
+                ZeroProjection(self.expanded_dim, 32),
             ])
         self.rank = nn.ModuleList(self.rank_list)
 
@@ -265,7 +319,7 @@ class GeoBloom(nn.Module):
         for i in range(depth):
             self.context_select_list.extend([
                 nn.Linear(32, 32),
-                nn.Linear(32, NUM_SLICES * NUM_BITS, bias=False),
+                ZeroProjection(self.expanded_dim, 32),
             ])
 
         self.context_select = nn.ModuleList(self.context_select_list)
@@ -274,7 +328,7 @@ class GeoBloom(nn.Module):
         for i in range(depth):
             self.context_rank_list.extend([
                 nn.Linear(32, 32),
-                nn.Linear(32, NUM_SLICES * NUM_BITS, bias=False),
+                ZeroProjection(self.expanded_dim, 32),
             ])
         self.context_rank = nn.ModuleList(self.context_rank_list)
 
@@ -287,6 +341,7 @@ class GeoBloom(nn.Module):
             ])
         self.residual = nn.ModuleList(self.residual_list)
         self.leaky_relu = nn.LeakyReLU(1.0 / division_factor)
+        self.fake_relu = FakeReLU()
 
         # The division factor must be a power of 2.
         # So that we can use bit shift instead of division to ensure the speed on the C++ side.
@@ -297,11 +352,7 @@ class GeoBloom(nn.Module):
         self.c = nn.Linear(depth, 1, bias=False)
         self.d = nn.Linear(depth, 1, bias=False)
 
-        # Initialize all decoder weights to 0.0 at the last layer, i.e., Zero-Projection
         for i in range(depth):
-            nn.init.zeros_(self.rank[2 * i + 1].weight)
-            nn.init.zeros_(self.context_select[2 * i + 1].weight)
-            nn.init.zeros_(self.context_rank[2 * i + 1].weight)
             nn.init.zeros_(self.residual[2 * i + 1].weight)
 
         nn.init.ones_(self.a.weight)
@@ -327,29 +378,6 @@ class GeoBloom(nn.Module):
                 )
     
 
-    @torch.no_grad()
-    def quantize_test(self):
-        '''
-            This function is used to test the accuracy loss of quantization.
-        '''
-        quantize_encoder = lambda x: x.mul(self.quantized_one).round()/self.quantized_one
-        quantize8 = lambda x: torch.clamp(x, min=-self.weight_bound, max=self.weight_bound).mul(self.weight_scale).round()/self.weight_scale
-        quantize32 = lambda x: x.mul(self.quantized_one * self.weight_scale).round()/(self.quantized_one * self.weight_scale)
-
-        self.encoder.weight.data = quantize_encoder(self.encoder.weight.data)
-        self.encoder.bias.data = quantize_encoder(self.encoder.bias.data)
-
-        for i in range(self.depth):
-            self.bottleneck[i].weight.data = quantize8(self.bottleneck[i].weight.data)
-            self.bottleneck[i].bias.data = quantize32(self.bottleneck[i].bias.data)
-
-        for layer in [self.rank, self.context_select, self.context_rank, self.residual]:
-            for i in range(self.depth):
-                layer[2 * i].weight.data = quantize8(layer[i][0].weight.data)
-                layer[2 * i].bias.data = quantize32(layer[i][0].bias.data)
-                layer[2 * i + 1].weight.data = quantize8(layer[i][1].weight.data)
-    
-
     @torch.inference_mode()
     def serialize(self, path, size_test=False):
         '''
@@ -371,22 +399,29 @@ class GeoBloom(nn.Module):
             serializer_float = lambda x: x.flatten().cpu().numpy().astype(np.float16).tobytes()
             
         buf = bytearray()
-        # header: tree depth
+        # header: tree depth.
+        # we don't need to serialize the bloom filter length as it must match the query & poi Bloom filter dataset.
         buf.extend(struct.pack('H', self.depth))
         # encoder layer
-        buf.extend(serializer_encoder(self.encoder.weight.T))
-        buf.extend(serializer_encoder(self.encoder.bias))
+        buf.extend(serializer_encoder(self.encoder.weight[:-1,:]))
+        buf.extend(serializer_encoder(self.encoder_bias))
 
         # bottleneck
         for i in range(self.depth):
             buf.extend(serializer8(self.bottleneck[i].weight[:,:256]))
 
         # all heads
-        for layer in [self.rank, self.context_select, self.context_rank, self.residual]:
+        for layer in [self.rank, self.context_select, self.context_rank]:
             for i in range(self.depth):
                 buf.extend(serializer8(layer[2 * i].weight))
                 buf.extend(serializer32(layer[2 * i].bias))
-                buf.extend(serializer8(layer[2 * i + 1].weight))
+                buf.extend(serializer8(layer[2 * i + 1].weight[:-1,:]))
+
+        layer = self.residual
+        for i in range(self.depth):
+            buf.extend(serializer8(layer[2 * i].weight))
+            buf.extend(serializer32(layer[2 * i].bias))
+            buf.extend(serializer8(layer[2 * i + 1].weight))
 
         # the parameter a, b, c, d
         buf.extend(serializer_float(self.a.weight))
@@ -428,15 +463,34 @@ class GeoBloom(nn.Module):
             lr_list.append({'params': layer[-2].parameters(), 'lr': 0.002})
             lr_list.append({'params': layer[-1].parameters(), 'lr': 0.002})
         return lr_list
-
+    
     @autocast()
-    def forward(self, query_bloom_filter, node_bloom_filter, query_loc, node_loc, node_radius, depth):
+    def forward(self, query_bloom_filter, node_sparse, node_dense, query_loc, node_loc, node_radius, depth):
         
-        query_bits = torch.sum(query_bloom_filter, dim=-1, keepdim=True)
-        node_bits = torch.sum(node_bloom_filter, dim=-1, keepdim=True)
-        
-        query_embedding = self.encoder(query_bloom_filter) / query_bits
-        node_embedding = self.encoder(node_bloom_filter) / node_bits
+        # query_bloom_filter: (query_bits, row, col), shape = (batch_size, self.bloom_filter_dim)
+        # node_bloom_filter: [(node_bits, row, col), ...] (len = batch_size), shape = (batch_size, candidate_num, self.bloom_filter_dim)
+        # node_dense: shape = (batch_size, candidate_num, self.bloom_filter_dim + 1)
+        # query_loc: shape = (batch_size, 2)
+        # node_loc: shape = (batch_size, candidate_num, 2)
+        # node_radius: shape = (batch_size, candidate_num, 1)
+        query_bits = (query_bloom_filter != self.bloom_filter_dim).sum(dim=-1).view(-1, 1)
+        query_embedding = self.encoder(query_bloom_filter)
+        query_embedding = (query_embedding + self.encoder_bias) / query_bits
+
+        dense = node_dense is not None
+        # NOTE: The information of node_bloom_filter all from the last layer of the tree.
+        # So we don't compute the gradient for first several layers.
+        if dense:
+            B, K, _ = node_dense.shape
+            node_bloom_filter = node_dense
+            node_bits = node_dense.sum(dim=-1).view(B, K, 1)
+            node_embedding = (node_dense @ self.encoder.weight + self.encoder_bias) / node_bits
+        else:
+            B, K, _ = node_sparse.shape
+            node_bloom_filter = node_sparse
+            node_bits = (node_sparse != self.bloom_filter_dim).sum(dim=-1).view(B, K, 1)
+            node_embedding = self.encoder(node_sparse.view(B * K, -1))
+            node_embedding = (node_embedding.view(B, K, -1) + self.encoder_bias) / node_bits
 
         query_embedding = torch.clamp(query_embedding, min=0, max=1)
         node_embedding = torch.clamp(node_embedding, min=0, max=1)
@@ -444,33 +498,33 @@ class GeoBloom(nn.Module):
         hidden = torch.cat([query_embedding.unsqueeze(1).expand_as(node_embedding), node_embedding], dim=-1)
         hidden = self.bottleneck_list[depth](hidden)
         hidden = torch.clamp(hidden, min=0, max=1)
+        H = hidden.shape[-1]
 
-        # Chunked LeakyReLU:
-        # We split the final layer into chunks to support SIMD acceleration.
-        # This will lead to significant speed increase while doesn't affect the accuracy.
+
+        intersection = query_bloom_filter.unsqueeze(1).expand(-1, K, -1)
+        intersection_mask = isin_cuda_wrapper(intersection.reshape(B * K, -1), node_bloom_filter.view(B * K, -1), self.bloom_filter_dim, dense).view(B, K, -1)
+        intersection = intersection.masked_fill(~intersection_mask, self.bloom_filter_dim)
         num_chunks = 8
 
+        # Efficient ChunkedLeakyReLU
         hidden_rank = self.rank_list[2 * depth](hidden)
-        hidden_rank = torch.clamp(hidden_rank, min=0, max=1)
-        hidden_rank_splits = torch.chunk(hidden_rank, num_chunks, dim=-1)
-        weight_rank_splits = torch.chunk(self.rank_list[2 * depth + 1].weight.T, num_chunks, dim=0)
-        hidden_rank = [self.leaky_relu(h_split.matmul(w_split)) for h_split, w_split in zip(hidden_rank_splits, weight_rank_splits)]
-        hidden_rank = sum(hidden_rank) + 1
-        del hidden_rank_splits, weight_rank_splits
-        intersection = torch.mul(query_bloom_filter.unsqueeze(1), node_bloom_filter)
-        text_score = torch.sum(hidden_rank * intersection, dim=-1)
-        del hidden_rank
+        hidden_rank = torch.clamp(hidden_rank, min=0, max=1) # shape = (B, K, 32)
+        selected_columns = self.rank_list[2 * depth + 1](intersection) # shape = (B, K, L, 32)
+        
+        hidden_rank = hidden_rank.unsqueeze(-2).mul(selected_columns).view(B, K, -1, num_chunks, H // num_chunks)
+        hidden_rank = self.leaky_relu(hidden_rank.sum(dim=-1)).sum(dim=-1) + 1
+        hidden_rank = hidden_rank.masked_fill(~intersection_mask, 0)
+        text_score = hidden_rank.sum(dim=-1)
 
         hidden_context_select = self.context_select_list[2 * depth](hidden)
         hidden_context_select = torch.clamp(hidden_context_select, min=0, max=1)
-        hidden_context_select_splits = torch.chunk(hidden_context_select, num_chunks, dim=-1)
-        weight_context_select_splits = torch.chunk(self.context_select_list[2 * depth + 1].weight.T, num_chunks, dim=0)
-        hidden_context_select = [F.relu(h_split.matmul(w_split) + 1e-6) for h_split, w_split in zip(hidden_context_select_splits, weight_context_select_splits)]
-        hidden_context_select = sum(hidden_context_select) + 1
-        del hidden_context_select_splits, weight_context_select_splits
-        context_select_score = torch.sum(hidden_context_select * intersection, dim=-1)
+        selected_columns = self.context_select_list[2 * depth + 1](intersection) # shape = (B, K, L, 32)
+        hidden_context_select = hidden_context_select.unsqueeze(-2).mul(selected_columns).view(B, K, -1, num_chunks, H // num_chunks)
+        hidden_context_select = self.fake_relu(hidden_context_select.sum(dim=-1)).sum(dim=-1) + 1
+        hidden_context_select = hidden_context_select.masked_fill(~intersection_mask, 0)
+        context_select_score = hidden_context_select.sum(dim=-1)
         final_context_select_score = context_select_score
-        del intersection, hidden_context_select
+        del hidden_context_select
        
         # Context selection
         with torch.no_grad():
@@ -478,23 +532,23 @@ class GeoBloom(nn.Module):
             mask = node_dist < self.d_threshold
             context_select_score = context_select_score.unsqueeze(1).expand_as(node_dist)
             context_select_score = context_select_score.masked_fill(~mask, -1e9)
+            context_select_score = context_select_score.masked_fill(torch.eye(K, dtype=torch.bool, device=context_select_score.device).unsqueeze(0).expand(B, -1, -1), -1e9)
             best_context_idx = torch.argmax(context_select_score, dim=-1)
             # best_context_idx: [batch_size, num_nodes]
             context_bloom_filter = torch.gather(node_bloom_filter, dim=1, index=best_context_idx.unsqueeze(-1).expand_as(node_bloom_filter))
             # residual matching: (query - query * node) * context = query * (context - context * node) = query * (context - node).relu(). The last formular is faster.
-            context_bloom_filter = (context_bloom_filter - node_bloom_filter).relu()
-            context_intersection = torch.mul(query_bloom_filter.unsqueeze(1), context_bloom_filter)
+            unmatched_bits = query_bloom_filter.unsqueeze(1).expand(-1, K, -1).masked_fill(intersection_mask, self.bloom_filter_dim)
+            context_intersection_mask = isin_cuda_wrapper(unmatched_bits.view(B * K, -1), context_bloom_filter.view(B * K, -1), self.bloom_filter_dim, dense).view(B, K, -1)
+            context_intersection = unmatched_bits.masked_fill(~context_intersection_mask, self.bloom_filter_dim)
         
         del query_bloom_filter, node_bloom_filter, context_bloom_filter
 
         hidden_context_rank = self.context_rank_list[2 * depth](hidden)
         hidden_context_rank = torch.clamp(hidden_context_rank, min=0, max=1)
-        hidden_context_rank_splits = torch.chunk(hidden_context_rank, num_chunks, dim=-1)
-        weight_context_rank_splits = torch.chunk(self.context_rank_list[2 * depth + 1].weight.T, num_chunks, dim=0)
-        hidden_context_rank = [self.leaky_relu(h_split.matmul(w_split)) for h_split, w_split in zip(hidden_context_rank_splits, weight_context_rank_splits)]
-        hidden_context_rank = sum(hidden_context_rank)
-
-        context_score = torch.sum(hidden_context_rank * context_intersection, dim=-1)
+        selected_columns = self.context_rank_list[2 * depth + 1](context_intersection) # shape = (B, K, L, 32)
+        hidden_context_rank = hidden_context_rank.unsqueeze(-2).mul(selected_columns).view(B, K, -1, num_chunks, H // num_chunks)
+        context_score = self.leaky_relu(hidden_context_rank.sum(dim=-1)).sum(dim=-1)
+        context_score = context_score.masked_fill(~context_intersection_mask, 0).sum(dim=-1)
         del hidden_context_rank, context_intersection
 
         res_hidden = self.residual_list[2 * depth](hidden)
@@ -532,102 +586,58 @@ class GeoBloom(nn.Module):
 
         return distances
 
-    @torch.inference_mode()
     @autocast()
-    def encode_node(self, node_bloom_filter, depth):
-        if node_bloom_filter.is_sparse:
-            node_bloom_filter = node_bloom_filter.to_dense()
-        node_bits = torch.sum(node_bloom_filter, dim=-1, keepdim=True)
-        node_embedding = self.encoder(node_bloom_filter) / node_bits
+    @torch.inference_mode()
+    def encode_node(self, sparse, dense, depth):
+        if sparse is not None:
+            node_bit_num = torch.sum(sparse != self.bloom_filter_dim, dim=-1).view(-1, 1)
+            node_embedding = self.encoder(sparse)
+            node_embedding = (node_embedding + self.encoder_bias) / node_bit_num
+        else:
+            node_embedding = dense @ self.encoder.weight + self.encoder_bias
+            node_bit_num = dense.sum(dim=-1).view(-1, 1)
+            node_embedding = node_embedding / node_bit_num
         node_embedding = torch.clamp(node_embedding, min=0, max=1)
         node_embedding = torch.matmul(node_embedding, self.bottleneck[depth].weight.T[256:])
         node_embedding = node_embedding + self.bottleneck[depth].bias
         return node_embedding
     
+    def encode_tree(self, tree: BloomFilterTree):
+        node_representations = []
+        for depth in tqdm(range(tree.depth), desc='Encoding nodes'):
+            sparse = tree.sparse_levels[depth]
+            dense = tree.dense_levels[depth]
+            # move it to cuda
+            if sparse is not None:
+                sparse = sparse.to(device='cuda', non_blocking=True).int()
+                sparse[sparse == -1] = self.bloom_filter_dim
+            if dense is not None:
+                dense = dense.to(device='cuda', non_blocking=True)
+            node_representations.append(self.encode_node(sparse, dense, depth).mul(127 * 64).round().to(dtype=torch.int32).cpu().numpy())
+        node_representations = np.vstack(node_representations)
+        torch.cuda.empty_cache()
+        return node_representations
 
+def train(model: GeoBloom, optimizer, tree: BloomFilterTree, train_beam_width, infer_beam_width, max_epochs, poi_dataset: POIDataset, batch_size, portion=None):
 
-def collate_query_candidates(tree, query_idxs, src_candidates):               
-    candidate_bloom_filters = []
-    candidate_node_locs = []
-    candidate_node_radius = []
-    for query_id in query_idxs:
-        candidate_nodes = src_candidates[query_id]
-        bloom_filter, loc, radius = tree.collate_nodes(candidate_nodes)
-        candidate_bloom_filters.append(bloom_filter)
-        candidate_node_locs.append(loc)
-        candidate_node_radius.append(radius)
-    candidate_bloom_filters = torch.stack(candidate_bloom_filters)
-    candidate_node_locs = torch.stack(candidate_node_locs)
-    candidate_node_radius = torch.stack(candidate_node_radius) 
-    return candidate_bloom_filters, candidate_node_locs, candidate_node_radius
-
-
-def prepare_target(tree, depth, dataloader, candidates, ensure_truth=False):
-    target_col = []
-    target_row = []
-    for batch in dataloader:
-        query_idxs, _, _, truth = batch
-        for i, query_idx in enumerate(query_idxs):
-            truth_nodes = set()
-            for poi_idx in truth[i]:
-                truth_nodes.add(tree.get_truth_path(poi_idx)[depth])
-            for j, node in enumerate(candidates[query_idx]):
-                if node in truth_nodes:
-                    target_row.append(query_idx)
-                    target_col.append(j)
-                    truth_nodes.remove(node)
-                    if len(truth_nodes) == 0:
-                        break
-            if ensure_truth and len(truth_nodes) > 0:
-                tail_index = len(candidates[query_idx]) - len(truth_nodes)
-                candidates[query_idx] = candidates[query_idx][:tail_index] + list(truth_nodes)
-                for k in range(len(truth_nodes)):
-                    target_row.append(query_idx)
-                    target_col.append(tail_index + k)
-
-    target = torch.sparse_coo_tensor(
-                torch.vstack([torch.tensor(target_row, dtype=torch.int32, device='cuda'), 
-                                torch.tensor(target_col, dtype=torch.int32, device='cuda')]), 
-                torch.ones_like(torch.tensor(target_col, dtype=torch.float16, device='cuda')), 
-                (len(dataloader.dataset), len(candidates[0])),
-                check_invariants=False)
-    target._coalesced_(True)
-    return target
-
-def common_bit_threshold(query_bloom_filter, node_bloom_filter):
-    common_bit = 0
-    for query_bit in query_bloom_filter:
-        if query_bit in node_bloom_filter:
-            common_bit += 1
-        if common_bit >= NUM_SLICES:
-            return True
-    return False
-
-def train(model: GeoBloom, optimizer, tree: BloomFilterTree, train_beam_width, infer_beam_width, max_epochs, train_dataloader, infer_train_dataloader, dev_dataloader, ensure_context_in_beam=False, portion=None):
-    # Train by layer
-    train_candidates = [[] for _ in range(tree.depth)]
-    train_candidates[0] = [tree.init_candidates] * len(train_dataloader.dataset)
-
-    current_train_beam_width = train_beam_width[0] if isinstance(train_beam_width, list) else train_beam_width
-    init_train_resample = len(train_candidates[0][0]) > current_train_beam_width
-    train_batch_size = train_dataloader.batch_size
-    init_train_bloom_filters, init_train_node_locs, init_train_node_radius = tree.init_bloom_filter.to_dense().unsqueeze(0).expand(train_batch_size,-1,-1), tree.init_loc.unsqueeze(0).expand(train_batch_size, -1, -1), tree.init_radius.unsqueeze(0).expand(train_batch_size, -1, -1)    
-    max_metrics = [0] * tree.depth
+    bloom_filter_dim = model.bloom_filter_dim
+    train_beam_width = [train_beam_width] * tree.depth if not isinstance(train_beam_width, list) else train_beam_width
+    num_train_queries = len(poi_dataset.train_dataset)
+    num_dev_queries = len(poi_dataset.dev_dataset)
+    train_bloom_filter = poi_dataset.train_dataset.query_bloom_filters
+    train_locs = poi_dataset.train_dataset.query_locs
+    max_metrics = [0] * (tree.depth + 1)
 
     # We apply recall truncation on GeoGLUE as it is too noisy.
     retrieve_loss = lambda pred, truth: lambdaLoss(pred, truth, k=100, reduction='sum')
     rank_loss = lambda pred, truth: lambdaLoss(pred, truth, weighing_scheme='lambdaRank_scheme', k=30, reduction='sum')
     context_loss = lambda pred, truth: lambdaLoss(pred, truth, k=30, reduction='sum')
     
-    ckpt_path = f'ckpt/{tree.dataset}_geobloom_v{VERSION}.pt' if portion is None else f'ckpt/{tree.dataset}_geobloom_v{VERSION}_{portion}.pt'
-    transfer_path = f'model/tmp/{tree.dataset}_v{VERSION}/' if portion is None else f'model/tmp/{tree.dataset}_v{VERSION}_{portion}/'
-    
-    scaler = GradScaler()
-    if not os.path.exists(transfer_path):
-        os.makedirs(transfer_path)
+    ckpt_path = f'ckpt/{tree.dataset_name}_geobloom_v{VERSION}.pt' if portion is None else f'ckpt/{tree.dataset_name}_geobloom_v{VERSION}_{portion}.pt'
+    transfer_path = f'model/tmp/{tree.dataset_name}_v{VERSION}/' if portion is None else f'model/tmp/{tree.dataset_name}_v{VERSION}_{portion}/'
 
-    if not os.path.exists('ckpt'):
-        os.makedirs('ckpt')
+    os.makedirs(transfer_path, exist_ok=True)
+    os.makedirs('ckpt', exist_ok=True)
 
     train_beam_width_str = '-'.join([str(x) for x in train_beam_width] if isinstance(train_beam_width, list) else [
         str(train_beam_width) for _ in range(tree.depth)])
@@ -635,88 +645,83 @@ def train(model: GeoBloom, optimizer, tree: BloomFilterTree, train_beam_width, i
         str(infer_beam_width) for _ in range(tree.depth)])
     
     # Prepare the truth nodes for evaluation
-    train_truth_nodes = [[set() for i in range(tree.depth)] for j in range(len(train_dataloader.dataset))]
-    dev_truth_nodes = [[set() for i in range(tree.depth)] for j in range(len(dev_dataloader.dataset))]
+    train_truth_idx = [[set() for i in range(num_train_queries)] for j in range(tree.depth)]
+    dev_truth_idx = [[set() for i in range(num_dev_queries)] for j in range(tree.depth)]
 
-    for i in range(len(train_dataloader.dataset)):
-        for poi_idx in train_dataloader.dataset.truths[i]:
+    for i in range(num_train_queries):
+        for poi_idx in poi_dataset.train_dataset.truths[i]:
             path = tree.get_truth_path(poi_idx)
             for depth in range(tree.depth):
-                train_truth_nodes[i][depth].add(path[depth])
-    for i in range(len(dev_dataloader.dataset)):
-        for poi_idx in dev_dataloader.dataset.truths[i]:
+                train_truth_idx[depth][i].add(path[depth].id_in_level)
+    for i in range(num_dev_queries):
+        for poi_idx in poi_dataset.dev_dataset.truths[i]:
             path = tree.get_truth_path(poi_idx)
             for depth in range(tree.depth):
-                dev_truth_nodes[i][depth].add(path[depth])
+                dev_truth_idx[depth][i].add(path[depth].id_in_level)
     
-
-    def encode_node(node_path):
-        node_representations = []
-        for depth in range(tree.depth):
-            node_dataset = NodeEncodeDataset([tree.levels[depth]])
-            node_dataloader = DataLoader(node_dataset, batch_size=64, shuffle=False, num_workers=0, collate_fn=node_dataset.collate_fn)
-            for batch in tqdm(node_dataloader, desc=f'Encoding node representations at depth {depth}'):
-                node_representations.append(model.encode_node(batch, depth).mul(127 * 64).round().to(dtype=torch.int32).cpu().numpy())
-        node_representations = np.vstack(node_representations).astype(np.int32)
-        with open(node_path, 'wb') as f:
-            f.write(node_representations.tobytes())
+    # We now record the time to reach the best dev ndcg.
+    start_time = time.time()
+    best_dev_time = 0
 
     for epoch in range(max_epochs):
         # We now use C++ inference engine to get the candidates.
         # First, we encode all the nodes into node.bin
-        encode_node(transfer_path + f'node_v{VERSION}.bin')
+        node_representations = model.encode_tree(tree).astype(np.int32)
+        node_path = transfer_path + f'node_v{VERSION}.bin'
+        with open(node_path, 'wb') as f:
+            f.write(node_representations.tobytes())
         # Second, save the quantized model parameters
         model.serialize(transfer_path + f'nnue_v{VERSION}.bin')
         # Third, run the C++ inference engine to get the candidates
         # For faster inference we use multiple threads on the C++ side.
         threads = str(8)
-        train_params = [f'nnue/v{VERSION}/nnue', tree.dataset, 'pytrain', threads, train_beam_width_str, transfer_path]
+        train_params = [f'nnue/v{VERSION}/nnue', tree.dataset_name, 'pytrain', threads, train_beam_width_str, transfer_path]
         if portion is not None:
             train_params.append(portion)
         subprocess.run(train_params)
-        subprocess.run([f'nnue/v{VERSION}/nnue', tree.dataset, 'pydev', threads, infer_beam_width_str, transfer_path])
+        subprocess.run([f'nnue/v{VERSION}/nnue', tree.dataset_name, 'pydev', threads, infer_beam_width_str, transfer_path])
 
         # Fourth, deserialize the candidates
-        next_train_candidates, train_topk = tree.load_candidates(transfer_path + f'train_nodes.bin', len(train_dataloader.dataset), train_beam_width)
-        next_dev_candidates, dev_topk = tree.load_candidates(transfer_path + f'dev_nodes.bin', len(dev_dataloader.dataset), infer_beam_width)
+        next_train_candidates, train_topk = tree.load_candidates(transfer_path + f'train_nodes.bin', num_train_queries, train_beam_width)
+        next_dev_candidates, dev_topk = tree.load_candidates(transfer_path + f'dev_nodes.bin', num_dev_queries, infer_beam_width)
 
         # Fifth, calculate train & dev recall and ndcg
         train_recalls, train_ndcgs = [], []
         dev_recalls, dev_ndcgs = [], []
-        for depth in range(1, tree.depth):
+        for depth in range(tree.depth):
             train_recalls.append([])
-            for i in range(len(train_dataloader.dataset)):
+            for i in range(num_train_queries):
                 hit = 0
-                for node in next_train_candidates[depth-1][i]:
-                    if node in train_truth_nodes[i][depth]:
+                for node in next_train_candidates[depth][i]:
+                    if node in train_truth_idx[depth][i]:
                         hit += 1
-                    if hit >= len(train_truth_nodes[i][depth]):
+                    if hit >= len(train_truth_idx[depth][i]):
                         break
-                train_recalls[-1].append(hit / len(train_truth_nodes[i][depth]))
+                train_recalls[-1].append(hit / len(train_truth_idx[depth][i]))
             train_recalls[-1] = np.mean(train_recalls[-1])
 
-        for i in range(len(train_dataloader.dataset)):
+        for i in range(num_train_queries):
             pred = train_topk[i]
-            truth = train_dataloader.dataset.truths[i]
+            truth = poi_dataset.train_dataset.truths[i]
             train_ndcgs.append(fast_ndcg(pred, truth, k=5))
 
         train_ndcgs = np.mean(train_ndcgs)
 
-        for depth in range(1, tree.depth):
+        for depth in range(tree.depth):
             dev_recalls.append([])
-            for i in range(len(dev_dataloader.dataset)):
+            for i in range(num_dev_queries):
                 hit = 0
-                for node in next_dev_candidates[depth-1][i]:
-                    if node in dev_truth_nodes[i][depth]:
+                for node in next_dev_candidates[depth][i]:
+                    if node in dev_truth_idx[depth][i]:
                         hit += 1
-                    if hit >= len(dev_truth_nodes[i][depth]):
+                    if hit >= len(dev_truth_idx[depth][i]):
                         break
-                dev_recalls[-1].append(hit / len(dev_truth_nodes[i][depth]))
+                dev_recalls[-1].append(hit / len(dev_truth_idx[depth][i]))
             dev_recalls[-1] = np.mean(dev_recalls[-1])
 
-        for i in range(len(dev_dataloader.dataset)):
+        for i in range(num_dev_queries):
             pred = dev_topk[i]
-            truth = dev_dataloader.dataset.truths[i]
+            truth = poi_dataset.dev_dataset.truths[i]
             dev_ndcgs.append(fast_ndcg(pred, truth, k=5))
 
         dev_ndcgs = np.mean(dev_ndcgs)
@@ -726,7 +731,7 @@ def train(model: GeoBloom, optimizer, tree: BloomFilterTree, train_beam_width, i
         print(f'Dev recall: {dev_recalls}, Dev NDCG @ 5: {dev_ndcgs}')
         print(f'Previous max metrics: {max_metrics}')
         # update the max metrics
-        for depth in range(tree.depth - 1):
+        for depth in range(tree.depth):
             if dev_recalls[depth] > max_metrics[depth]:
                 max_metrics[depth] = dev_recalls[depth]
 
@@ -734,6 +739,8 @@ def train(model: GeoBloom, optimizer, tree: BloomFilterTree, train_beam_width, i
         if max_metrics[-1] < dev_ndcgs:
             max_metrics[-1] = dev_ndcgs
             save = True
+            best_dev_time = time.time() - start_time
+            print(f'New best dev time: {best_dev_time} (s)')
             # If trained, save the model
         
         print(f'Current max metrics: {max_metrics}')
@@ -742,82 +749,86 @@ def train(model: GeoBloom, optimizer, tree: BloomFilterTree, train_beam_width, i
             torch.save(model.state_dict(), ckpt_path)
             print(f'Model saved to {ckpt_path}')
 
-        train_candidates = train_candidates[:1] + next_train_candidates
-
         model.train()
         # When training, we mix all the depth together to prevent catastrophic forgetting
-        train_sample_by_depth = []
-        train_target_by_depth = []
-        print('Preparing training samples...')
-        for depth in range(tree.depth):
-            # construct training samples for all depths
-            if depth > 0 or not init_train_resample:
-                train_target = prepare_target(tree, depth, infer_train_dataloader, train_candidates[depth], ensure_truth=True)
-            if depth == 0 and init_train_resample:
-                train_sample = []
-                for train_candidate_list in train_candidates[depth]:
-                    sampled_candidates = random.sample(train_candidate_list, current_train_beam_width)
-                    train_sample.append(sampled_candidates)
-                train_target = prepare_target(tree, depth, infer_train_dataloader, train_sample, ensure_truth=True)
-            else:
-                train_sample = train_candidates[depth]
-            train_sample_by_depth.append(train_sample)
-            train_target_by_depth.append(train_target)
+        
+        print('Preparing training data and targets...')
 
-        train_bar = tqdm(train_dataloader, desc=f'Mixed training on {tree.depth} depths')
+        scaler = GradScaler()   
+        # We reconstruct the training dataloader for each depth.
+        train_dataloader = []
+        train_iter = []
+        for depth in range(tree.depth):
+            train_dataset = POIRetrievalDataset(train_bloom_filter, poi_dataset.num_slices, poi_dataset.num_bits, train_locs, tree.sparse_levels[depth], tree.dense_levels[depth], tree.location_levels[depth], tree.radius_levels[depth], train_truth_idx[depth], next_train_candidates[depth], train_beam_width[depth])
+            train_dataloader.append(DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True, collate_fn=train_dataset.collate_fn))
+            train_iter.append(iter(train_dataloader[-1]))
+
+        # The dataloader has exactly the same number of batches for each depth.
         retrieve_losses = []
         rank_losses = []
         last_retrieve_loss = 0
         last_rank_loss = 0
-        for batch in train_bar:
-            query_idxs, query_bloom_filter, query_loc, _ = batch
-            query_bloom_filter = query_bloom_filter.to_dense()
-            for depth in range(tree.depth):
-                train_target = train_target_by_depth[depth]
-                # If it is the first depth, sampling not required, and the batch size is equal to the train batch size,
-                # We can use the pre-computed bloom filters to save time.
-                if depth == 0 and not init_train_resample and len(query_idxs) == train_batch_size:
-                    node_bfs, node_locs, node_radius = init_train_bloom_filters, init_train_node_locs, init_train_node_radius
-                else:
-                    train_sample = train_sample_by_depth[depth]
-                    node_bfs, node_locs, node_radius = collate_query_candidates(tree, query_idxs, train_sample)
-                node_bfs = node_bfs.to_dense()
-                target = train_target.index_select(dim=0, index=torch.tensor(query_idxs, dtype=torch.int64, device='cuda'))
-                target = target.to_dense()
-                # v18: optimize the context score via lambdaRank
+
+        
+        train_bar = tqdm(range(len(train_dataloader[0])), desc=f'Mixed training on {tree.depth} depths')
+        for _ in train_bar:
+            # reverse depth for debug: 
+            for depth in range(tree.depth-1, -1, -1):
+                try:
+                    batch = next(train_iter[depth])
+                except StopIteration:
+                    train_iter[depth] = iter(train_dataloader[depth])
+                    batch = next(train_iter[depth])
+                query_bfs, query_loc, node_sparse, node_dense, node_locs, node_radius, target = batch
+                query_bfs = query_bfs.to(device='cuda', non_blocking=True).int()
+                query_bfs[query_bfs == -1] = bloom_filter_dim
+                query_loc = query_loc.to(device='cuda', non_blocking=True)
+                dense = node_dense is not None
+                if node_sparse is not None:
+                    node_sparse = node_sparse.to(device='cuda', non_blocking=True).int()
+                    node_sparse[node_sparse == -1] = bloom_filter_dim
+                    node_bfs = node_sparse
+                if node_dense is not None:
+                    node_dense = node_dense.to(device='cuda', non_blocking=True)
+                    node_bfs = node_dense
+                node_locs = node_locs.to(device='cuda', non_blocking=True)
+                node_radius = node_radius.to(device='cuda', non_blocking=True)
+                target = target.to(device='cuda', non_blocking=True)
                 with torch.inference_mode():
-                    select_mask = target == 1
-                    truth_bloom_filter = []
-                    for i in range(target.shape[0]):
-                        selected_nodes = node_bfs[i][select_mask[i]]
-                        truth_bloom_filter.append(torch.sum(selected_nodes, dim=0))
-                    truth_bloom_filter = torch.stack(truth_bloom_filter)
-                    context_truth = (query_bloom_filter - truth_bloom_filter).relu()
+                    B, K, _ = node_bfs.shape
+                    # query_bfs shape = (B, L)
+                    # select_mask shape = (B, K)
+                    # node_bfs shape = (B, K, L)
+                    top1_truth = torch.argmax(target, dim=-1) # shape = (B,)
+                    truth_bfs = node_bfs[torch.arange(B), top1_truth] # shape = (B, L)
+                    has_truth = (target != 0).any(dim=-1)
+                    if not dense:
+                        truth_bfs[~has_truth, :] = bloom_filter_dim
+                    else:
+                        truth_bfs[~has_truth, :] = 0
+                    match_bits = isin_cuda_wrapper(query_bfs, truth_bfs, bloom_filter_dim, dense) # shape = (B, L)
+                    missing_bits = query_bfs.masked_fill(match_bits, bloom_filter_dim)
                     # The context truth only contains those words that are not in the ground truth but in the query.
                     # We need to find the most similar node bloom filter in the slate, and select it as the context.
-                    query_bits = query_bloom_filter.sum(dim=-1)
-                    easy_mask = (context_truth.sum(dim=-1) < query_bits * 0.5)
-                    context_rank_truth = torch.sum(context_truth.unsqueeze(1).expand_as(node_bfs) * node_bfs, dim=-1) # (batch_size, slate_length)
-                    easy_rank_truth = torch.sum(query_bloom_filter.unsqueeze(1).expand_as(node_bfs) * node_bfs, dim=-1)
-                    context_rank_truth[easy_mask] = easy_rank_truth[easy_mask]  
+                    query_bits = (query_bfs != bloom_filter_dim).sum(dim=-1)
+                    missing_bit_num = (missing_bits != bloom_filter_dim).sum(dim=-1)
+                    easy_query = (missing_bit_num < query_bits * 0.5)
+                    # NOTE: can't use repeat(K, 1) to replace unsqueeze(1).expand(-1, K, -1).reshape(B * K, -1) as it gets wrong results.
+                    context_rank_truth = isin_cuda_wrapper(missing_bits.unsqueeze(1).expand(-1, K, -1).reshape(B * K, -1), node_bfs.view(B * K, -1), bloom_filter_dim, dense)
+                    context_rank_truth = context_rank_truth.view(B, K, -1).sum(dim=-1)
+                    # NOTE: When there is no ground truth in beam, we also can't find a correct context.
+                    context_rank_truth[~has_truth] = -1
+                    context_rank_truth[easy_query] = -1
                     node_dist = GeoBloom.node_pairwise_distances(node_locs)
                     node_dist[target.unsqueeze(-2).expand_as(node_dist) == 0] = float('inf')
                     min_dist, _ = torch.min(node_dist, dim=-1)
                     dist_mask = min_dist > 1000
-                    context_rank_truth[dist_mask] = 0
-                    if ensure_context_in_beam:
-                        # Add 0.5 to the max context truth to ensure it is in the beam
-                        # On GeoGLUE this is quite effective, but on Meituan this makes no difference. 
-                        col_indices = torch.argmax(context_rank_truth, dim=-1)
-                        row_indices = torch.arange(context_rank_truth.shape[0], dtype=torch.int64, device='cuda')
-                        target[row_indices, col_indices] += 0.5
-                    context_rank_truth[easy_mask] = -1    
-                    del node_dist, min_dist, dist_mask, easy_mask, easy_rank_truth, truth_bloom_filter, context_truth, select_mask
+                    context_rank_truth[dist_mask] = -1
+                    del truth_bfs, match_bits, missing_bits, node_dist, min_dist, dist_mask
                     
-                score, context_score = model(query_bloom_filter, node_bfs, query_loc, node_locs, node_radius, depth)
-                node_bfs, node_locs, node_radius = None, None, None
+                score, context_score = model(query_bfs, node_sparse, node_dense, query_loc, node_locs, node_radius, depth)
                 loss_fn = rank_loss if depth == tree.depth - 1 else retrieve_loss
-                loss = loss_fn(score, target) + 0.1 * context_loss(context_score, context_rank_truth)
+                loss = loss_fn(score, target) + 0.1 * context_loss(context_score, context_rank_truth.float())
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
@@ -831,96 +842,40 @@ def train(model: GeoBloom, optimizer, tree: BloomFilterTree, train_beam_width, i
                     last_retrieve_loss = loss_value
                     retrieve_losses.append(loss_value)
                 train_bar.set_postfix({'retrieve_loss': last_retrieve_loss, 'rank_loss': last_rank_loss})
-
         print(f'Epoch={epoch}, retrieve loss={np.mean(retrieve_losses)}, rank loss={np.mean(rank_losses)}')
-
+        
     print(f'Max metrics: {max_metrics}')
 
     # We now quantize the best model and encode the node for further testing.
     model.load_state_dict(torch.load(ckpt_path))
-    encode_node(f'data_bin/{tree.dataset}/node_v{VERSION}.bin')
-    model.serialize(f'data_bin/{tree.dataset}/nnue_v{VERSION}.bin')
-    print(f'Model serialized to data_bin/{tree.dataset}/nnue_v{VERSION}.bin')
+    node_representations = model.encode_tree(tree).astype(np.int32)
+    node_representations = np.vstack(node_representations).astype(np.int32)
+    node_path = f'data_bin/{tree.dataset_name}/node_v{VERSION}.bin' 
+    with open(node_path, 'wb') as f:
+        f.write(node_representations.tobytes())
+    print(f'Node representations saved to {node_path}')
+    model.serialize(f'data_bin/{tree.dataset_name}/nnue_v{VERSION}.bin')
+    print(f'Model serialized to data_bin/{tree.dataset_name}/nnue_v{VERSION}.bin')
 
-
-@torch.no_grad()
-def infer(model: GeoBloom, tree: BloomFilterTree, infer_beam_width, dataloader):
-    # NOTE: This function is only for debugging. Use the C++ inference engine instead.
-    model.eval()
-    model.quantize_test()
-    candidates = [[] for _ in range(tree.depth)]
-    candidates[0] = [tree.init_candidates] * len(dataloader.dataset)
-    batch_size = dataloader.batch_size
-    init_bloom_filters_sparse, init_node_locs, init_node_radius = torch.stack([tree.init_bloom_filter] * batch_size), tree.init_loc.unsqueeze(0).repeat(batch_size, 1, 1), tree.init_radius.unsqueeze(0).repeat(batch_size, 1, 1)
-
-    final_metrics = [0] * tree.depth
-    model.eval()
-    results = []
-    for depth in range(tree.depth):
-        next_depth = depth + 1 if depth < tree.depth - 1 else -1
-        current_infer_beam_width = infer_beam_width[next_depth] if isinstance(infer_beam_width, list) else infer_beam_width
-        if depth == 0:
-            init_bloom_filters = init_bloom_filters_sparse.to_dense()
-        next_candidates = [[] for _ in range(len(dataloader.dataset))]
-        metrics = []
-        for batch in tqdm(dataloader, desc=f'Searching at depth = {depth}'):
-            query_idxs, query_bloom_filter, query_loc, truths = batch
-            if depth == 0:
-                if len(query_idxs) == batch_size:
-                    node_bfs, node_locs, node_radius = init_bloom_filters, init_node_locs, init_node_radius
-                else:
-                    node_bfs, node_locs, node_radius = torch.stack([tree.init_bloom_filter] * len(query_idxs)).to_dense(), tree.init_loc.unsqueeze(0).repeat(len(query_idxs), 1, 1), tree.init_radius.unsqueeze(0).repeat(len(query_idxs), 1, 1)
-            else:
-                node_bfs, node_locs, node_radius = collate_query_candidates(tree, query_idxs, candidates[depth])
-            query_bloom_filter = query_bloom_filter.to_dense()
-            node_bfs = node_bfs.to_dense()
-            score, context_score = model(query_bloom_filter, node_bfs, query_loc, node_locs, node_radius, depth)
-            node_bfs, node_locs, node_radius = None, None, None
-            sorted_indices = torch.argsort(score, dim=-1, descending=True).cpu().numpy()
-            for i, query_id in enumerate(query_idxs):
-                metric_depth = depth + 1 if depth < tree.depth - 1 else -1
-                if depth == tree.depth - 1:
-                    predict = [candidates[depth][query_id][idx].poi_idx for idx in sorted_indices[i]]
-                    metrics.append(fast_ndcg(predict, truths[i], k=5))
-                    results.append(predict)
-                else:
-                    truth_nodes = set()
-                    for poi_idx in truths[i]:
-                        truth_nodes.add(tree.get_truth_path(poi_idx)[metric_depth])
-                    hit = 0
-                    for idx in sorted_indices[i]:
-                        for child in candidates[depth][query_id][idx].child:
-                            next_candidates[query_id].append(child)
-                            if child in truth_nodes:
-                                hit += 1
-                            if len(next_candidates[query_id]) >= current_infer_beam_width:
-                                break
-                        if len(next_candidates[query_id]) >= current_infer_beam_width:
-                            break
-                    metrics.append(hit / len(truth_nodes))
-
-        final_metrics[depth] = np.mean(metrics)
-        print('Current metrics: ', final_metrics)
-        
-        init_bloom_filters = None
-        if depth == tree.depth - 1:
-            break
-        candidates[depth + 1] = next_candidates
-
-    print(f'Metrics: {final_metrics}')
-
-    results = np.array(results).astype(np.uint32)
-    return results
-
+    # run the C++ engine for testing
+    threads = str(8)
+    test_params = [f'nnue/v{VERSION}/nnue', tree.dataset_name, 'test', threads, infer_beam_width_str]
+    subprocess.run(test_params)
+    print(f'Best dev time: {best_dev_time} (s)')
+    # append the best dev time to the result file if it exists
+    result_path = f'result/{tree.dataset_name}_v{VERSION}_test.txt'
+    if os.path.exists(result_path):
+        with open(result_path, 'a') as f:
+            f.write(f'Best dev time: {best_dev_time} (s)\n')
                 
 if __name__ == '__main__':
 
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default='GeoGLUE_clean')
+    parser.add_argument('--dataset', type=str, default='Beijing')
     parser.add_argument('--task', type=str, default='train')
     parser.add_argument('--portion', type=str, default='1')
-    parser.add_argument('--epochs', type=int, default=10)
+    parser.add_argument('--epochs', type=int, default=15)
 
     args = parser.parse_args()
     dataset = args.dataset
@@ -928,6 +883,12 @@ if __name__ == '__main__':
     portion = args.portion
     portion = None if portion == '1' else portion
     max_epochs = args.epochs
+    if dataset == 'GeoGLUE': # GeoGLUE has significant more noisy POIs, which requires longer Bloom filters.
+        num_slices = 2
+        num_bits = 16384
+    else:
+        num_slices = 2
+        num_bits = 8192
 
     ckpt_path = f'ckpt/{dataset}_geobloom_v{VERSION}.pt' if portion is None else f'ckpt/{dataset}_geobloom_v{VERSION}_{portion}.pt'
     nnue_path = f'data_bin/{dataset}/nnue_v{VERSION}.bin'
@@ -942,11 +903,11 @@ if __name__ == '__main__':
         # Identify the tensor - replace 'layer_name.weight' with the actual key
         if '_orig_mod.a.weight' in ckpt:
             depth = ckpt['_orig_mod.a.weight'].shape[1]
-            model = GeoBloom(depth=depth).cuda()
+            model = GeoBloom(bloom_filter_dim=num_slices * num_bits, depth=depth).cuda()
             model = torch.compile(model)
         elif 'a.weight' in ckpt:
             depth = ckpt['a.weight'].shape[1]
-            model = GeoBloom(depth=depth).cuda()
+            model = GeoBloom(bloom_filter_dim=num_slices * num_bits,depth=depth).cuda()
         else:
             print('Cannot find the depth of the model in the checkpoint.')
             exit()
@@ -958,31 +919,29 @@ if __name__ == '__main__':
             exit()
 
     # Create the data module and prepare the datasets
-    batch_size = 4 if 'GeoGLUE' in dataset else 32
-    poi_dataset = POIDataset(dataset, batch_size=batch_size, num_workers=0, load_query=task!='node', portion=portion)
+    batch_size = 8 if dataset == 'GeoGLUE' else 64
+    poi_dataset = POIDataset(dataset, num_slices, num_bits, load_query=task!='node', portion=portion)
 
     train_beam_width = {
-        'MeituanBeijing': 200,
-        'MeituanShanghai': 200,
-        'GeoGLUE': [1000, 1000, 1000, 1000],
-        'GeoGLUE_clean': [1000, 500, 500, 500],
+        'Beijing': 100,
+        'Shanghai': 100,
+        'GeoGLUE': 400,
+        'GeoGLUE_clean': 400,
     }
 
     infer_beam_width = {
-        'MeituanBeijing': [400, 400, 400, 400],
-        'MeituanShanghai': [400, 400, 400, 400],
-        'GeoGLUE': [6000, 4000, 4000, 1000],
-        'GeoGLUE_clean': [2000, 1000, 1000, 1000],
+        'Beijing': 400,
+        'Shanghai': 400,
+        'GeoGLUE': 4000,
+        'GeoGLUE_clean': 800,
     }
 
     # Initialize the model
-    tree = BloomFilterTree(dataset, poi_dataset.poi_bloom_filters, poi_dataset.poi_locs)
-    model = GeoBloom(depth=tree.depth).cuda()
-    model = torch.compile(model)
-    if 'GeoGLUE' in dataset:
-        learning_rate = 5e-4
-    else:
-        learning_rate = 1e-3
+    tree = BloomFilterTree(poi_dataset, width=8)
+    tree.prepare_tensors()
+    model = GeoBloom(bloom_filter_dim=num_slices * num_bits, depth=tree.depth).cuda()
+    # model = torch.compile(model)
+    learning_rate = 1e-3
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     if task == 'train' or task == 'continue':
@@ -996,39 +955,14 @@ if __name__ == '__main__':
             train_beam_width[dataset], 
             infer_beam_width[dataset],
             max_epochs = max_epochs,
-            train_dataloader=poi_dataset.train_dataloader, 
-            infer_train_dataloader=poi_dataset.infer_train_dataloader, 
-            dev_dataloader=poi_dataset.dev_dataloader,
-            ensure_context_in_beam=dataset == 'GeoGLUE',
-            portion=portion)
-
-    elif task == 'pytest':
-        # load the current best model
-        state_dict = torch.load(ckpt_path)
-        uncompiled_model = GeoBloom(depth=tree.depth).cuda()
-        # clone the weights
-        new_state_dict = {}
-        for key in state_dict:
-            # if the key starts with _orig_mod, it is the quantized model
-            if key.startswith('_orig_mod.'):
-                new_state_dict[key[10:]] = state_dict[key]
-            else:
-                new_state_dict[key] = state_dict[key]
-        uncompiled_model.load_state_dict(new_state_dict)
-        # Testing loop
-        # load the best model
-        top_indices = infer(uncompiled_model, tree, infer_beam_width[dataset], poi_dataset.test_dataloader)
-        # np.save(f'result/{dataset}_geobloom_v{VERSION}_top100.npy', top_indices)
+            poi_dataset = poi_dataset,
+            batch_size = batch_size,
+            portion = portion)
 
     elif task == 'node' or task == 'size_test':
         # load the current best model
         model.load_state_dict(torch.load(ckpt_path))
-        node_representations = []
-        for depth in range(tree.depth):
-            node_dataset = NodeEncodeDataset([tree.levels[depth]])
-            node_dataloader = DataLoader(node_dataset, batch_size=64, shuffle=False, num_workers=0, collate_fn=node_dataset.collate_fn)
-            for batch in tqdm(node_dataloader, desc=f'Encoding node representations at depth {depth}'):
-                node_representations.append(model.encode_node(batch, depth).mul(127 * 64).round().to(dtype=torch.int32).cpu().numpy())
+        node_representations = model.encode_tree(tree).astype(np.int32)
 
         if task == 'node':
             # In inference we simply use int32 precomputed embedding to following the NNUE scheme, reducing our workload.

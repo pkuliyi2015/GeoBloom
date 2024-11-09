@@ -1,7 +1,6 @@
 // -------------------------------------------------
 // GeoBloom search engine
 // Corresponding to python geobloom_v{VERSION}.py
-// Will do modularized design in the future
 // -------------------------------------------------
 
 #include "nnue_avx2.h"
@@ -14,6 +13,8 @@
 #include <algorithm>
 #include <thread>
 #include <atomic>
+#include <unistd.h>
+#include <string>
 
 using namespace std;
 
@@ -84,7 +85,7 @@ float recall_intermediate(set<uint32_t>& truth, vector<uint32_t>& prediction) {
     return num_correct / truth.size();
 }
 
-void evaluate(Dataset & dataset, vector<uint32_t> * predictions){
+vector<float> evaluate(Dataset & dataset, vector<uint32_t> * predictions){
 
     float ndcg1 = 0, ndcg5 = 0, recall10=0, recall20=0;
     for (int i = 0; i < dataset.num_rows; ++i) {
@@ -106,14 +107,15 @@ void evaluate(Dataset & dataset, vector<uint32_t> * predictions){
     cout << "Recall@20 \t Recall@10  \t NDCG@5  \t NDCG@1" << endl;
     cout << fixed << recall20 << "\t" << recall10 << "\t" << ndcg5 << "\t" << ndcg1 << endl;
     cout << "=========================================================" << endl;
-
+    return {recall20, recall10, ndcg5, ndcg1};
 }
 
-void thread_search(NNUE * nnue, Tree* tree, Dataset & dataset, vector<uint32_t> & beam_width, vector<uint32_t> * predictions, int start, int end, int buffer_size, atomic<int>& counter) {
+void thread_search(NNUE & nnue, Tree* tree, Dataset & dataset, vector<uint32_t> & beam_width, vector<uint32_t> * predictions, int start, int end, int buffer_size, atomic<int>& counter) {
     sort_buffer buffer(buffer_size, 1024);
     for (int i = start; i < end; ++i) {
-        vector<uint32_t> result = tree->beam_search_nnue(*nnue, dataset.bloom_filters[i], dataset.locations[i].first, dataset.locations[i].second, beam_width, buffer, 200);
-        predictions[i] = result;
+        vector<vector<uint32_t>> result;
+        tree->beam_search_nnue(nnue, dataset.bloom_filters[i], dataset.locations[2 * i], dataset.locations[2 * i + 1], beam_width, buffer, result);
+        predictions[i] = result[result.size() - 1];
         int processed = counter.fetch_add(1) + 1;
         if (processed % 1000 == 0) {
             cout << "Searching " << processed << "th query..." << endl;
@@ -122,7 +124,7 @@ void thread_search(NNUE * nnue, Tree* tree, Dataset & dataset, vector<uint32_t> 
 }
 
 
-void single_thread_search(NNUE * nnue, Tree* tree, Dataset & dataset, vector<uint32_t> & beam_width, vector<uint32_t> * predictions) {
+void single_thread_search(NNUE & nnue, Tree* tree, Dataset & dataset, vector<uint32_t> & beam_width, vector<uint32_t> * predictions) {
     int buffer_size = tree->sizes[0];
     for (int i=1; i < tree->sizes.size(); i++){
         int current_buffer_size = min(beam_width[i], tree->sizes[i]);
@@ -133,7 +135,7 @@ void single_thread_search(NNUE * nnue, Tree* tree, Dataset & dataset, vector<uin
 }
 
 
-void multi_thread_search(int num_threads, NNUE * nnue, Tree* tree, Dataset & dataset, vector<uint32_t> & beam_width, vector<uint32_t> * predictions) {
+void multi_thread_search(int num_threads, NNUE & nnue, Tree* tree, Dataset & dataset, vector<uint32_t> & beam_width, vector<uint32_t> * predictions) {
     int buffer_size = tree->sizes[0];
     for (int i = 1; i < tree->sizes.size(); i++) {
         int current_buffer_size = min(beam_width[i], tree->sizes[i]);
@@ -146,7 +148,7 @@ void multi_thread_search(int num_threads, NNUE * nnue, Tree* tree, Dataset & dat
     for (int i = 0; i < num_threads; ++i) {
         int start = i * chunk_size;
         int end = (i != num_threads - 1) ? (start + chunk_size) : dataset.num_rows;
-        threads[i] = thread(thread_search, nnue, tree, ref(dataset), ref(beam_width), predictions, start, end, buffer_size, ref(counter));
+        threads[i] = thread(thread_search, ref(nnue), tree, ref(dataset), ref(beam_width), predictions, start, end, buffer_size, ref(counter));
     }
     // Wait for all threads to finish
     for (auto &t : threads) {
@@ -154,27 +156,27 @@ void multi_thread_search(int num_threads, NNUE * nnue, Tree* tree, Dataset & dat
     }
 }
 
-void single_thread_speed_test(NNUE * nnue, Tree* tree, Dataset & dataset, vector<uint32_t> & beam_width) {
+void single_thread_speed_test(NNUE & nnue, Tree* tree, Dataset & dataset, vector<uint32_t> & beam_width) {
     vector<uint32_t> * predictions = new vector<uint32_t>[dataset.num_rows];
     auto start_search = clock();
     single_thread_search(nnue, tree, dataset, beam_width, predictions);
     auto end_search = clock();
 
-    cout << "Search time: " << (double)(end_search - start_search) / CLOCKS_PER_SEC << "s" << endl;
-    cout << "Query Per Second: " << dataset.num_rows / ((double)(end_search - start_search) / CLOCKS_PER_SEC) << endl;
+    cout << "Search time: " << (float)(end_search - start_search) / CLOCKS_PER_SEC << "s" << endl;
+    cout << "Query Per Second: " << dataset.num_rows / ((float)(end_search - start_search) / CLOCKS_PER_SEC) << endl;
     // Compute the ndcg score
     evaluate(dataset, predictions);
     delete[] predictions;
 }
 
-void multi_thread_speed_test(int num_threads, NNUE * nnue, Tree* tree, Dataset & dataset, vector<uint32_t> & beam_width, const string & output_path = "") {
+void multi_thread_speed_test(int num_threads, NNUE & nnue, Tree* tree, Dataset & dataset, vector<uint32_t> & beam_width, const string & output_path = "") {
     vector<uint32_t> * predictions = new vector<uint32_t>[dataset.num_rows];
     auto start_search = clock();
     multi_thread_search(num_threads, nnue, tree, dataset, beam_width, predictions);
     auto end_search = clock();
 
-    cout << "Total search time of all threads: " << (double)(end_search - start_search) / CLOCKS_PER_SEC << "s" << endl;
-    cout << "Query Per Second: " << dataset.num_rows / ((double)(end_search - start_search) / CLOCKS_PER_SEC) << endl;
+    cout << "Total search time of all threads: " << (float)(end_search - start_search) / CLOCKS_PER_SEC << "s" << endl;
+    cout << "Query Per Second: " << dataset.num_rows / ((float)(end_search - start_search) / CLOCKS_PER_SEC) << endl;
     // Compute the ndcg score
     evaluate(dataset, predictions);
     if(output_path != ""){
@@ -193,12 +195,10 @@ void multi_thread_speed_test(int num_threads, NNUE * nnue, Tree* tree, Dataset &
     delete[] predictions;
 }
 
-void thread_search_intermediates(NNUE * nnue, Tree* tree, Dataset & dataset, vector<uint32_t> & beam_width, vector<vector<uint32_t>> * predictions, int start, int end, int buffer_size, atomic<int>& counter) {
+void thread_search_intermediates(NNUE & nnue, Tree* tree, Dataset & dataset, vector<uint32_t> & beam_width, vector<vector<uint32_t>> * predictions, int start, int end, int buffer_size, atomic<int>& counter) {
     sort_buffer buffer(buffer_size, 1024);
     for (int i = start; i < end; ++i) {
-        vector<vector<uint32_t>> result = tree->beam_search_nnue_intermediates(*nnue, dataset.bloom_filters[i], dataset.locations[i].first, dataset.locations[i].second, beam_width, buffer, 20);
-        predictions[i] = result;
-
+        tree->beam_search_nnue(nnue, dataset.bloom_filters[i], dataset.locations[2 * i], dataset.locations[2 * i + 1], beam_width, buffer, predictions[i]);
         int processed = counter.fetch_add(1) + 1;
         if (processed % 10000 == 0) {
             cout << "Searching " << processed << "th query..." << endl;
@@ -207,7 +207,7 @@ void thread_search_intermediates(NNUE * nnue, Tree* tree, Dataset & dataset, vec
 }
 
 
-void search_intermediates(int num_threads, NNUE * nnue, Tree* tree, Dataset & dataset, vector<uint32_t> & beam_width, const string & output_path) {
+vector<float> search_intermediates(int num_threads, NNUE & nnue, Tree* tree, Dataset & dataset, vector<uint32_t> & beam_width, const string & output_path) {
     vector<vector<uint32_t>> * predictions = new vector<vector<uint32_t>>[dataset.num_rows];
     int buffer_size = tree->sizes[0];
     for (int i = 1; i < tree->sizes.size(); i++) {
@@ -222,7 +222,7 @@ void search_intermediates(int num_threads, NNUE * nnue, Tree* tree, Dataset & da
     for (int i = 0; i < num_threads; ++i) {
         int start = i * chunk_size;
         int end = (i != num_threads - 1) ? (start + chunk_size) : dataset.num_rows;
-        threads[i] = thread(thread_search_intermediates, nnue, tree, ref(dataset), ref(beam_width), predictions, start, end, buffer_size, ref(counter));
+        threads[i] = thread(thread_search_intermediates, ref(nnue), tree, ref(dataset), ref(beam_width), predictions, start, end, buffer_size, ref(counter));
     }
     // Wait for all threads to finish
     for (auto &t : threads) {
@@ -230,11 +230,11 @@ void search_intermediates(int num_threads, NNUE * nnue, Tree* tree, Dataset & da
     }
     auto end_search = clock();
 
-    cout << "Total search time of all threads: " << (double)(end_search - start_search) / CLOCKS_PER_SEC
-         << "s, Query Per Second: " << dataset.num_rows / ((double)(end_search - start_search) / CLOCKS_PER_SEC) << endl;
+    cout << "Total search time of all threads: " << (float)(end_search - start_search) / CLOCKS_PER_SEC
+         << "s, Query Per Second: " << dataset.num_rows / ((float)(end_search - start_search) / CLOCKS_PER_SEC) << endl;
 
-    float * recall_scores = new float[tree->sizes.size() - 1];
-    memset(recall_scores, 0, sizeof(float) * (tree->sizes.size() - 1));
+    float * recall_scores = new float[tree->sizes.size()];
+    memset(recall_scores, 0, sizeof(float) * tree->sizes.size());
     // Compute the recall score
     for (int i = 0; i < dataset.num_rows; ++i) {
         if (predictions[i].size() == 0) {
@@ -250,12 +250,12 @@ void search_intermediates(int num_threads, NNUE * nnue, Tree* tree, Dataset & da
                 truth_by_depth[depth].insert(truth_path[depth]);
             }
         }
-        for (int depth = 0; depth < predictions[i].size()-1; depth++){
+        for (int depth = 0; depth < predictions[i].size(); depth++){
             recall_scores[depth] += recall_intermediate(truth_by_depth[depth], predictions[i][depth]);
         }
     }
-    for (int depth = 1; depth < tree->sizes.size(); depth++){
-        recall_scores[depth - 1] /= dataset.num_rows;
+    for (int depth = 0; depth < tree->sizes.size(); depth++){
+        recall_scores[depth] /= dataset.num_rows;
     }
 
     float ndcg_score = 0;
@@ -270,8 +270,8 @@ void search_intermediates(int num_threads, NNUE * nnue, Tree* tree, Dataset & da
     // Print statistics
     cout << "=============== Intermediate Recall Scores =============="<< endl;
     cout.precision(6);
-    for (int depth = 1; depth < tree->sizes.size(); depth++){
-        cout << fixed << recall_scores[depth - 1] << "\t";
+    for (int depth = 0; depth < tree->sizes.size(); depth++){
+        cout << fixed << recall_scores[depth] << "\t";
     }
     cout << endl;
     vector<uint32_t> * top_predictions = new vector<uint32_t>[dataset.num_rows];
@@ -281,12 +281,14 @@ void search_intermediates(int num_threads, NNUE * nnue, Tree* tree, Dataset & da
         }
         top_predictions[i] = predictions[i][predictions[i].size() - 1];
     }
-    evaluate(dataset, top_predictions);
+    vector<float> ndcg_recall = evaluate(dataset, top_predictions);
     // Write the predictions to file. Just write everything in binary in a row
     ofstream file(output_path, ios::binary);
     if (!file) {
         cerr << "Cannot open file: " << output_path << endl;
-        return;
+        delete[] predictions;
+        delete[] top_predictions;
+        return {0, 0, 0, 0};
     }
     for (int i = 0; i < dataset.num_rows; i++){
         for (int depth = 0; depth < predictions[i].size(); depth++){
@@ -297,8 +299,29 @@ void search_intermediates(int num_threads, NNUE * nnue, Tree* tree, Dataset & da
     cout << "Predictions saved to " << output_path << endl;
     delete[] predictions;
     delete[] top_predictions;
+    return ndcg_recall;
 }
 
+// Helper function to read VmHWM
+int get_vmhwm() {
+    int vmhwm = 0;
+    ifstream status_file("/proc/self/status");
+    string line;
+    while (getline(status_file, line)) {
+        if (line.find("VmHWM:") == 0) {
+            sscanf(line.c_str(), "VmHWM: %d", &vmhwm);
+            break;
+        }
+    }
+    return vmhwm;
+}
+
+void report_memory_usage(const string &component, int &previous_vmhwm) {
+    int current_vmhwm = get_vmhwm();
+    float usage_mb = static_cast<float>(current_vmhwm - previous_vmhwm) / 1024;
+    cout << component << " Memory Usage: " << usage_mb << " MB" << endl;
+    previous_vmhwm = current_vmhwm;
+}
 
 // Use argv to pass the dataset name
 int main(int argc, char *argv[]) {
@@ -307,14 +330,14 @@ int main(int argc, char *argv[]) {
     string task;
     bool has_portion = false;
     string portion;
-    int num_threads = 16;
+    int num_threads = 1;
     vector<uint32_t> beam_width;
     string transfer_path;
     if (argc < 2) {
         cout << "Usage: " << argv[0] << " <dataset_name> <task> <num_threads> <beamwidth1-beamwidth2-...> <transfer_path>" << endl;
-        dataset_name = "MeituanBeijing";
+        dataset_name = "GeoGLUE";
         task = "test";
-        beam_width = {200, 300, 300, 300};
+        beam_width = {4000, 4000, 4000, 4000};
         transfer_path = "data_bin/" + dataset_name + "/";
     }
     else {
@@ -339,11 +362,11 @@ int main(int argc, char *argv[]) {
                 }
             } else {
                 if(dataset_name == "GeoGLUE"){
-                    beam_width = {6000, 6000, 4000, 1000};
-                }else if (dataset_name == "MeituanBeijing"){
-                    beam_width = {200, 300, 300, 300};
-                }else if (dataset_name == "MeituanShanghai"){
-                    beam_width = {200, 300, 300, 300};
+                    beam_width = {4000, 4000, 4000, 4000};
+                }else if (dataset_name == "Beijing"){
+                    beam_width = {400, 400, 400, 400};
+                }else if (dataset_name == "Shanghai"){
+                    beam_width = {400, 400, 400, 400};
                 }
             }
             // Parse the output path here. Task 1 does not need output path; Task 2 and 3 need output path
@@ -381,6 +404,38 @@ int main(int argc, char *argv[]) {
     string node_path = transfer_path + "node_v" + to_string(VERSION) + ".bin";
     string nnue_path = transfer_path + "nnue_v" + to_string(VERSION) + ".bin";
 
+
+    int initial_vmhwm = get_vmhwm();
+    int previous_vmhwm = initial_vmhwm;
+
+    if (task == "memory") {
+        cout << "====================== Memory Usage ======================" << endl;
+        cout << "Initial VmHWM: " << initial_vmhwm / 1024 << " MB" << endl;
+
+        // Load POI dataset and record memory
+        Dataset poi;
+        poi.load(poi_path);
+        report_memory_usage("POI dataset", previous_vmhwm);
+
+        // Load model and embeddings, then record memory
+        NNUE nnue(BloomFilter::dim);
+        nnue.load(dataset_path + "nnue_v" + to_string(VERSION) + ".bin");
+        report_memory_usage("NNUE model", previous_vmhwm);
+
+        // Construct the tree and load embeddings
+        vector<vector<vector<uint32_t>>> levels;
+        load_tree(tree_path, levels);
+        Tree* tree = new Tree(poi, levels, nnue.depth);
+        report_memory_usage("Bloom Filter Tree", previous_vmhwm);
+
+        tree->load_embeddings(dataset_path + "node_v" + to_string(VERSION) + ".bin");
+        report_memory_usage("Node embeddings", previous_vmhwm);
+
+        cout << "Final VmHWM: " << get_vmhwm() / 1024 << " MB" << endl;
+        delete tree;
+        return 0;
+    }
+
     // Load the dataset
     Dataset poi, train, dev, test;
     poi.load(poi_path);
@@ -389,17 +444,26 @@ int main(int argc, char *argv[]) {
     vector<vector<vector<uint32_t>>> levels;
     load_tree(tree_path, levels);
     
-    NNUE * nnue = (NNUE *) aligned_alloc(64, sizeof(NNUE));
-    nnue->load(nnue_path);
+    NNUE nnue(BloomFilter::dim);
+
+    if (task != "unsupervised"){
+        nnue.load(nnue_path);
+    } else {
+        nnue.unsupervised();
+    }
     // Construct the tree
-    Tree * tree = new Tree(poi, levels, nnue->depth);
-    tree->load_embeddings(node_path);
-    tree->prune_bits();
+    Tree * tree = new Tree(poi, levels, nnue.depth);
+    if (task != "unsupervised"){
+        tree->load_embeddings(node_path);
+    } else {
+        tree->dummy_embeddings();
+    }
+
     // Task 1: Speed test
     if (task == "speed"){
         test.load(test_path);
         cout << "Testing speed on " << test.num_rows << " queries..." << endl;
-        multi_thread_speed_test(num_threads, nnue, tree, test, beam_width);
+        single_thread_speed_test(nnue, tree, test, beam_width);
     }else if(task == "pydev"){
         dev.load(dev_path);
         cout << "Preparing dev candidates..." << endl;
@@ -408,10 +472,23 @@ int main(int argc, char *argv[]) {
         train.load(train_path);
         cout << "Preparing train candidates..." << endl;
         search_intermediates(num_threads, nnue, tree, train, beam_width, transfer_path + "train_nodes.bin");
-    }else if(task == "test"){
+    }else if(task == "test" || task == "unsupervised"){
         test.load(test_path);
         cout << "Infering test candidates..." << endl;
-        search_intermediates(num_threads, nnue, tree, test, beam_width, transfer_path + "test_nodes.bin");
+        vector<float> ndcg_recall = search_intermediates(num_threads, nnue, tree, test, beam_width, transfer_path + "test_nodes.bin");
+        // save the logs to the result folder
+        if (ndcg_recall[0] != 0){
+            // open the log file with append mode
+            ofstream log_file("result/" + dataset_name + "_v" + to_string(VERSION) + "_test.txt", ios::app);
+            if (!log_file) {
+                cerr << "Cannot open file: " << "result/" + dataset_name + "_v" + to_string(VERSION) + "_test.txt" << endl;
+                delete tree;
+                return 0;
+            }// log the test date
+            time_t now = time(0);
+            log_file << ctime(&now);
+            log_file << "Recall@20: " << ndcg_recall[0] << "\tRecall@10: " << ndcg_recall[1] << "\tNDCG@5: " << ndcg_recall[2] << "\tNDCG@1: " << ndcg_recall[3] << endl;
+        }
     }else if (task == "all"){
         train.load(train_path);
         dev.load(dev_path);
@@ -429,6 +506,5 @@ int main(int argc, char *argv[]) {
     }
     
     delete tree;
-    free(nnue);
     return 0;
 }

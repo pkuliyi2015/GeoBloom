@@ -23,7 +23,7 @@ if __name__ == "__main__":
     parser.add_argument("--encoding_batch_size",type=int,default=1024)
     parser.add_argument("--step",type=int,default=320)
     # parser.add_argument("--poi_encoder_path",default="wandb/latest-run/files/step-4278/doc_encoder")
-    # parser.add_argument("--output_dir",default="embeddings/MeituanBeijing/")
+    # parser.add_argument("--output_dir",default="embeddings/Beijing/")
 
     args = parser.parse_args()
     dataset = args.dataset

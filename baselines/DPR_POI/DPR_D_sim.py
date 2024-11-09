@@ -30,7 +30,7 @@ test_embeddings = torch.tensor(test_embeddings, dtype=torch.float16).cuda()
 # We also consider the distance. It needs to be loaded from the file, and normalized.
 
 processed_poi_file = processed_path + '/poi.txt'
-processed_query_file = processed_path + '/test_anchor.txt'
+processed_query_file = processed_path + '/test.txt'
 
 
 query_txt = []

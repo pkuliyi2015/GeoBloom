@@ -11,11 +11,8 @@
 #define USE_CONTEXT
 using namespace std;
 
-constexpr double INF = numeric_limits<double>::infinity();
+constexpr float INF = numeric_limits<float>::infinity();
 constexpr int MAX_AVX2_REGISTERS = 16; // We can use 16 AVX2 registers at most
-constexpr int NUM_SLICES = 4;
-constexpr int NUM_BITS = 8192;
-constexpr int BF_SIZE =  NUM_BITS * NUM_SLICES / 32;
 constexpr int MAX_TOP_CONTEXT = 30;
 
 // Utility Functions
@@ -170,70 +167,20 @@ void calc_mean_std(int len, int* arr, double& mean, double& std) {
 }
 
 // Sigmoid function
-inline double sigmoid(double x) {
+inline float sigmoid(float x) {
     return 1 / (1 + exp(-x));
 }
 
 // ReLU function
-inline double relu(double x) {
-    return max(0.0, x);
+inline float relu(float x) {
+    return x > 0 ? x : 0;
 }
 
 class BloomFilter;
 
-class Dataset {
-public:
-    vector<vector<uint16_t>> bloom_filters;
-    vector<pair<double, double>> locations;
-    vector<vector<uint32_t>> truths;
-    uint32_t num_rows = 0;
-    uint32_t num_cols = 0;
-    bool has_truth_flag = false;
-
-    bool load(const string& file_dir) {
-        ifstream file(file_dir, ios::binary);
-
-        if (!file) {
-            cerr << "Cannot open file: " << file_dir << endl;
-            return false;
-        }
-
-        file.read(reinterpret_cast<char*>(&num_rows), sizeof(num_rows));
-        file.read(reinterpret_cast<char*>(&num_cols), sizeof(num_cols));
-        uint16_t has_truth;
-        file.read(reinterpret_cast<char*>(&has_truth), sizeof(has_truth));
-        has_truth_flag = has_truth == 1;
-
-        bloom_filters.resize(num_rows);
-        vector<uint16_t> bloom_filter_lengths(num_rows);
-        file.read(reinterpret_cast<char*>(bloom_filter_lengths.data()), num_rows * sizeof(uint16_t));
-
-        for (uint32_t i = 0; i < num_rows; ++i) {
-            bloom_filters[i].resize(bloom_filter_lengths[i]);
-            file.read(reinterpret_cast<char*>(bloom_filters[i].data()), bloom_filter_lengths[i] * sizeof(uint16_t));
-        }
-
-        locations.resize(num_rows);
-        file.read(reinterpret_cast<char*>(locations.data()), num_rows * sizeof(double) * 2);
-
-        if (has_truth_flag) {
-            truths.resize(num_rows);
-            for (uint32_t i = 0; i < num_rows; ++i) {
-                uint16_t truth_len;
-                file.read(reinterpret_cast<char*>(&truth_len), sizeof(truth_len));
-                truths[i].resize(truth_len);
-                file.read(reinterpret_cast<char*>(truths[i].data()), truth_len * sizeof(uint32_t));
-            }
-        }
-        file.close();
-
-        return true;
-    }
-};
-
-// NOTE: We shouldn't use bitset as it is too slow comparing to our implementation
 class BloomFilter {
 public:
+    static int dim;
     alignas(64) uint32_t * bits = nullptr;
 
     BloomFilter() {}
@@ -244,7 +191,7 @@ public:
 
     BloomFilter operator|= (const BloomFilter &other) {
         // OR operation in avx2
-        for (int i = 0; i < BF_SIZE; i+=8) {
+        for (int i = 0; i < dim / 32; i+=8) {
             __m256i data = _mm256_load_si256((__m256i *) (this->bits + i));
             __m256i result = _mm256_or_si256(data, _mm256_load_si256((__m256i *) (other.bits + i)));
             _mm256_store_si256((__m256i *) (this->bits + i), result);
@@ -254,7 +201,7 @@ public:
 
     BloomFilter operator^= (const BloomFilter &other) {
         // XOR operation in avx2
-        for (int i = 0; i <  BF_SIZE; i+=8) {
+        for (int i = 0; i < dim / 32; i+=8) {
             __m256i data = _mm256_loadu_si256((__m256i *) (this->bits + i));
             __m256i result = _mm256_xor_si256(data, _mm256_loadu_si256((__m256i *) (other.bits + i)));
             _mm256_storeu_si256((__m256i *) (this->bits + i), result);
@@ -308,6 +255,68 @@ public:
 };
 
 
+int BloomFilter::dim = 0;
+
+class Dataset {
+public:
+    vector<vector<uint16_t>> bloom_filters;
+    float * locations = nullptr;
+    vector<vector<uint32_t>> truths;
+    uint32_t num_rows = 0;
+    uint32_t num_cols = 0;
+    bool has_truth_flag = false;
+
+    ~Dataset() {
+        if (locations != nullptr) {
+            free(locations);
+        }
+    }
+
+    bool load(const string& file_dir) {
+        ifstream file(file_dir, ios::binary);
+
+        if (!file) {
+            cerr << "Cannot open file: " << file_dir << endl;
+            return false;
+        }
+        file.read(reinterpret_cast<char*>(&num_rows), sizeof(num_rows));
+        file.read(reinterpret_cast<char*>(&num_cols), sizeof(num_cols));
+        BloomFilter::dim = num_cols;
+        uint16_t has_truth;
+        file.read(reinterpret_cast<char*>(&has_truth), sizeof(has_truth));
+        has_truth_flag = has_truth == 1;
+
+        bloom_filters.resize(num_rows);
+        vector<uint16_t> bloom_filter_lengths(num_rows);
+        file.read(reinterpret_cast<char*>(bloom_filter_lengths.data()), num_rows * sizeof(uint16_t));
+
+        for (uint32_t i = 0; i < num_rows; ++i) {
+            bloom_filters[i].resize(bloom_filter_lengths[i]);
+            file.read(reinterpret_cast<char*>(bloom_filters[i].data()), bloom_filter_lengths[i] * sizeof(uint16_t));
+        }
+
+        locations = (float *) malloc(num_rows * sizeof(float) * 2);
+        file.read(reinterpret_cast<char*>(locations), num_rows * sizeof(float) * 2);
+
+        if (has_truth_flag) {
+            truths.resize(num_rows);
+            for (uint32_t i = 0; i < num_rows; ++i) {
+                uint16_t truth_len;
+                file.read(reinterpret_cast<char*>(&truth_len), sizeof(truth_len));
+                truths[i].resize(truth_len);
+                file.read(reinterpret_cast<char*>(truths[i].data()), truth_len * sizeof(uint32_t));
+            }
+        }
+        file.close();
+
+        return true;
+    }
+};
+
+// NOTE: We shouldn't use bitset as it is too slow comparing to our implementation
+
+
+
 class TreeNode {
     // A normal BERT 768 embedding requires 768 * 32 = 24576 bits
     // In this 4-bit version, our representaion is slightly larger (NUM_SLICES * NUM_BITS + 2048 bits)
@@ -315,12 +324,12 @@ class TreeNode {
 public:
     BloomFilter bloom_filter;
     vector<uint16_t> * bloom_filter_compressed = nullptr;
-    double location[2];
-    double radius;
+    float location[2];
+    float radius;
     uint32_t node_idx;
     TreeNode* parent;
     vector<TreeNode*> * children;
-    double boundary[4]; // min_lat, max_lat, min_lon, max_lon
+    float boundary[4]; // min_lat, max_lat, min_lon, max_lon
 
     // The following embedding is computed  in the searching process
     int32_t * embedding = nullptr;
@@ -332,10 +341,10 @@ public:
         }
     }
 
-    void set_leaf_node(vector<uint16_t>& bloom_filter, pair<double, double>& location, uint32_t node_idx) {
+    void set_leaf_node(vector<uint16_t>& bloom_filter, float * location, uint32_t node_idx) {
         this->bloom_filter_compressed = &bloom_filter;
-        double lat = location.first;
-        double lon = location.second;
+        float lat = location[0];
+        float lon = location[1];
         this->location[0] = lat;
         this->location[1] = lon;
         this->node_idx = node_idx;
@@ -375,8 +384,8 @@ public:
     }
 
     void compute_radius() {
-        double lat_diff = this->boundary[1] - this->boundary[0];
-        double lon_diff = this->boundary[3] - this->boundary[2];
+        float lat_diff = this->boundary[1] - this->boundary[0];
+        float lon_diff = this->boundary[3] - this->boundary[2];
         this->radius = sqrt(lat_diff * lat_diff + lon_diff * lon_diff) / 2.0;
         this->location[0] = (this->boundary[0] + this->boundary[1]) / 2.0;
         this->location[1] = (this->boundary[2] + this->boundary[3]) / 2.0;
@@ -390,27 +399,41 @@ public:
     void load(ifstream& file) {
         file.read(reinterpret_cast<char*>(weight), sizeof(weight));
     }
+
+    void unsupervised(){
+    }
 };
 
 
 
 class NNUEReweighter {
 public:
-    alignas(64) int8_t l1_weight [32][32];
-    alignas(64) int32_t l1_bias [32];
-    alignas(64) int8_t l2_weight [NUM_SLICES * NUM_BITS][32];
+    alignas(64) int8_t l1_weight[32][32];
+    alignas(64) int32_t l1_bias[32];
+    alignas(64) int8_t* l2_weight;
+    static int dim;
+    NNUEReweighter(){
+        
+    }
+
+    ~NNUEReweighter() {
+        if (l2_weight != nullptr) {
+            free(l2_weight);
+        }
+    }
 
     void load(ifstream& file) {
         file.read(reinterpret_cast<char*>(l1_weight), sizeof(l1_weight));
         file.read(reinterpret_cast<char*>(l1_bias), sizeof(l1_bias));
-        file.read(reinterpret_cast<char*>(l2_weight), sizeof(l2_weight));
+        l2_weight = (int8_t *)aligned_alloc(64, dim * 32 * sizeof(int8_t));
+        file.read(reinterpret_cast<char*>(l2_weight), dim * 32 * sizeof(int8_t));
     }
 
-    bool empty(){
+    bool empty() {
         bool all_zeros = true;
-        for (int i = 0; i < NUM_SLICES * NUM_BITS; ++i) {
+        for (int i = 0; i < dim; ++i) {
             for (int j = 0; j < 32; ++j) {
-                if (l2_weight[i][j] != 0) {
+                if (l2_weight[i * 32 + j] != 0) {
                     all_zeros = false;
                     break;
                 }
@@ -418,7 +441,18 @@ public:
         }
         return all_zeros;
     }
+
+    void unsupervised(){
+        l2_weight = (int8_t *)aligned_alloc(64, dim * 32 * sizeof(int8_t));
+        for (int i = 0; i < dim; ++i) {
+            for (int j = 0; j < 32; ++j) {
+                l2_weight[i * 32 + j] = 0;
+            }
+        }
+    }
 };
+
+int NNUEReweighter::dim = 0;
 
 class NNUEResidual {
 public:
@@ -442,23 +476,40 @@ public:
         }
         return all_zeros;
     }
+
+    void unsupervised(){
+        for (int i = 0; i < 32; ++i) {
+            l2_weight[i] = 0;
+        }
+    }
 };
 
 
 class NNUE {
 public:
-    alignas(64) uint16_t depth;
-    alignas(64) int32_t encoder_weight[NUM_SLICES * NUM_BITS][256];
-    alignas(64) int32_t encoder_bias[256];
+    uint16_t depth;
+    int32_t* encoder_weight = nullptr;
+    int32_t* encoder_bias = nullptr;
 
-    alignas(64) NNUEBottleNeck * bottleneck = nullptr;
-    
-    alignas(64) NNUEReweighter * rank = nullptr;
-    alignas(64) NNUEReweighter * context_select = nullptr;
-    alignas(64) NNUEReweighter * context_rank = nullptr;
-    alignas(64) NNUEResidual * residual = nullptr;
+    NNUEBottleNeck* bottleneck = nullptr;
+    NNUEReweighter* rank = nullptr;
+    NNUEReweighter* context_select = nullptr;
+    NNUEReweighter* context_rank = nullptr;
+    NNUEResidual* residual = nullptr;
+
+    int dim;
+
+    NNUE(int dim) {
+        this->dim = dim;
+    }
 
     ~NNUE() {
+        if (encoder_weight != nullptr) {
+            free(encoder_weight);
+        }
+        if (encoder_bias != nullptr) {
+            free(encoder_bias);
+        }
         if (rank != nullptr) {
             free(rank);
         }
@@ -488,13 +539,17 @@ public:
         c.resize(depth);
         d.resize(depth);
 
-        file.read(reinterpret_cast<char*>(encoder_weight), sizeof(encoder_weight));
-        file.read(reinterpret_cast<char*>(encoder_bias), sizeof(encoder_bias));
+        encoder_weight = (int32_t *)aligned_alloc(64, dim * 256 * sizeof(int32_t));
+        file.read(reinterpret_cast<char*>(encoder_weight), dim * 256 * sizeof(int32_t));
+        encoder_bias = (int32_t *)aligned_alloc(64, 256 * sizeof(int32_t)); 
+        file.read(reinterpret_cast<char*>(encoder_bias), 256 * sizeof(int32_t));
 
         bottleneck = (NNUEBottleNeck *)aligned_alloc(64, sizeof(NNUEBottleNeck) * depth);
         for (int i = 0; i < depth; ++i) {
             bottleneck[i].load(file);
         }
+
+        NNUEReweighter::dim = dim;
 
         // memory allocation & weight loading
         rank = (NNUEReweighter *)aligned_alloc(64, sizeof(NNUEReweighter) * depth);
@@ -535,6 +590,39 @@ public:
         return true;
     }
 
+    void unsupervised(){
+        cout << "Use unsupervised model." << endl;
+        NNUEReweighter::dim = dim;
+        depth = 4;
+        encoder_weight = (int32_t *)aligned_alloc(64, dim * 256 * sizeof(int32_t));
+        encoder_bias = (int32_t *)aligned_alloc(64, 256 * sizeof(int32_t)); 
+        bottleneck = (NNUEBottleNeck *)aligned_alloc(64, sizeof(NNUEBottleNeck) * depth);
+        rank = (NNUEReweighter *)aligned_alloc(64, sizeof(NNUEReweighter) * depth);
+        context_select = (NNUEReweighter *)aligned_alloc(64, sizeof(NNUEReweighter) * depth);
+        context_rank =  (NNUEReweighter *)aligned_alloc(64, sizeof(NNUEReweighter) * depth);
+        residual = (NNUEResidual *)aligned_alloc(64, sizeof(NNUEResidual) * depth);
+
+        for (int i = 0; i < depth; ++i) {
+            bottleneck[i].unsupervised();
+            rank[i].unsupervised();
+            context_select[i].unsupervised();
+            context_rank[i].unsupervised();
+            residual[i].unsupervised();
+        }
+
+        a.resize(depth);
+        b.resize(depth);
+        c.resize(depth);
+        d.resize(depth);
+
+        for (int i = 0; i < depth; ++i) {
+            a[i] = 1;
+            b[i] = 0;
+            c[i] = 1;
+            d[i] = 1;
+        }
+    }
+
     inline void encode_query_avx2(vector<uint16_t> &bloom_filter, int32_t * query_embedding) {
         // This is the AVX2 version of the query encoder
         // The weights are 256 int32_t. Every time we process 8 numbers
@@ -546,7 +634,7 @@ public:
         constexpr int num_chunks = MAX_AVX2_REGISTERS;
         alignas (64) int32_t buffer[256];
         int normalization = bloom_filter.size(); // In our case, it always > 0
-        if (normalization == 0){
+        if (normalization <= 0){
             normalization = 1;
         }
         alignas (64) int bound = normalization * 127;
@@ -558,7 +646,9 @@ public:
             }
             for (uint16_t b: bloom_filter) {
                 for (int i = 0; i < num_chunks; ++i) {
-                    regs[i] = _mm256_add_epi32(regs[i], _mm256_load_si256((__m256i *) &encoder_weight[b][i * 8 + loop]));
+                    // encoder_weight is a 2D array of [dim][256]
+                    // we access it with pointer arithmetic
+                    regs[i] = _mm256_add_epi32(regs[i], _mm256_load_si256((__m256i *) &encoder_weight[b * 256 + i * 8 + loop]));
                 }
             }
             // clipping to [0, bound]
@@ -654,8 +744,8 @@ public:
         __m256i negative_sum = _mm256_setzero_si256();
         __m256i context_select_hidden_vec = _mm256_load_si256((__m256i *) context_select_hidden);
         __m256i context_positive_sum = _mm256_setzero_si256();
-        int8_t (& rank_weight)[32768][32] = rank[depth].l2_weight;
-        int8_t (& context_select_weight)[32768][32] = context_select[depth].l2_weight;
+        int8_t * rank_weight = rank[depth].l2_weight;
+        int8_t * context_select_weight = context_select[depth].l2_weight;
         // We need to loop through the query numbers to calculate the intersection score
         // If the node bloom filter is not compressed, we directly use the bits
         if (node->bloom_filter.bits != nullptr){
@@ -663,13 +753,13 @@ public:
             for(int i = 0; i < query_length; i++){
                 uint16_t query_number = query_numbers[i];
                 if (bits[query_number >> 5] &  (1 << (query_number & 31))) {
-                    __m256i weight_vec = _mm256_load_si256((__m256i *) &rank_weight[query_number][0]);
+                    __m256i weight_vec = _mm256_load_si256((__m256i *) &rank_weight[query_number * 32]);
                     __m256i score_vec = _mm256_maddubs_epi16(hidden_vec, weight_vec);
                     score_vec = _mm256_madd_epi16(score_vec, _mm256_set1_epi16(1));
                     // extract the 8 int32_t from score_vec for leaky relu
                     positive_sum = _mm256_add_epi32(positive_sum, _mm256_max_epi32(score_vec, _mm256_set1_epi32(0)));
                     negative_sum = _mm256_add_epi32(negative_sum, _mm256_min_epi32(score_vec, _mm256_set1_epi32(0)));
-                    __m256i context_weight_vec = _mm256_load_si256((__m256i *) &(context_select_weight[query_number][0]));
+                    __m256i context_weight_vec = _mm256_load_si256((__m256i *) &(context_select_weight[query_number * 32]));
                     __m256i context_score_vec = _mm256_maddubs_epi16(context_select_hidden_vec, context_weight_vec);
                     context_score_vec = _mm256_madd_epi16(context_score_vec, _mm256_set1_epi16(1));
                     context_positive_sum = _mm256_add_epi32(context_positive_sum, _mm256_max_epi32(context_score_vec, _mm256_set1_epi32(0)));
@@ -690,13 +780,13 @@ public:
             while (i < bloom_filter_len && j < query_length){
                 uint16_t query_number = query_numbers[j];
                 if (bloom_filter[i] == query_number){
-                    __m256i weight_vec = _mm256_load_si256((__m256i *) &rank_weight[query_number][0]);
+                    __m256i weight_vec = _mm256_load_si256((__m256i *) &rank_weight[query_number * 32]);
                     __m256i score_vec = _mm256_maddubs_epi16(hidden_vec, weight_vec);
                     score_vec = _mm256_madd_epi16(score_vec, _mm256_set1_epi16(1));
                     // extract the 8 int32_t from score_vec for leaky relu
                     positive_sum = _mm256_add_epi32(positive_sum, _mm256_max_epi32(score_vec, _mm256_set1_epi32(0)));
                     negative_sum = _mm256_add_epi32(negative_sum, _mm256_min_epi32(score_vec, _mm256_set1_epi32(0)));
-                    __m256i context_weight_vec = _mm256_load_si256((__m256i *) &(context_select_weight[query_number][0]));
+                    __m256i context_weight_vec = _mm256_load_si256((__m256i *) &(context_select_weight[query_number * 32]));
                     __m256i context_score_vec = _mm256_maddubs_epi16(context_select_hidden_vec, context_weight_vec);
                     context_score_vec = _mm256_madd_epi16(context_score_vec, _mm256_set1_epi16(1));
                     context_positive_sum = _mm256_add_epi32(context_positive_sum, _mm256_max_epi32(context_score_vec, _mm256_set1_epi32(0)));
@@ -742,8 +832,7 @@ public:
         int & context_select_score,
         int8_t * context_rank_hidden,
         int & unmatched_bits_length,
-        uint16_t * unmatched_bits,
-        bool is_leaf
+        uint16_t * unmatched_bits
     ) {
         alignas (64) int8_t rank_hidden[32];
         alignas (64) int8_t context_select_hidden[32];
@@ -758,10 +847,9 @@ public:
         const uint16_t * query_numbers, 
         const int8_t * context_rank_hidden,
         const int depth,
-        int & context_score,
-        bool is_leaf
+        int & context_score
     ) {
-        int8_t (&weight)[32768][32] = context_rank[depth].l2_weight;
+        int8_t * weight = context_rank[depth].l2_weight;
         // v18: This function calculates the context score only.
         __m256i hidden_vec = _mm256_load_si256((__m256i *) context_rank_hidden);
         __m256i positive_sum = _mm256_setzero_si256();
@@ -773,7 +861,7 @@ public:
             for(int i = 0; i < query_length; i++){
                 uint16_t query_number = query_numbers[i];
                 if (bits[query_number >> 5] &  (1 << (query_number & 31))) {
-                    __m256i weight_vec = _mm256_load_si256((__m256i *) &weight[query_number][0]);
+                    __m256i weight_vec = _mm256_load_si256((__m256i *) &weight[query_number * 32]);
                     __m256i score_vec = _mm256_maddubs_epi16(hidden_vec, weight_vec);
                     score_vec = _mm256_madd_epi16(score_vec, _mm256_set1_epi16(1));
                     // extract the 8 int32_t from score_vec for leaky relu
@@ -791,7 +879,7 @@ public:
             while (i < bloom_filter_len && j < query_length){
                 uint16_t query_number = query_numbers[j];
                 if (bloom_filter[i] == query_number){
-                     __m256i weight_vec = _mm256_load_si256((__m256i *) &weight[query_number][0]);
+                     __m256i weight_vec = _mm256_load_si256((__m256i *) &weight[query_number * 32]);
                     __m256i score_vec = _mm256_maddubs_epi16(hidden_vec, weight_vec);
                     score_vec = _mm256_madd_epi16(score_vec, _mm256_set1_epi16(1));
                     // extract the 8 int32_t from score_vec for leaky relu
@@ -814,11 +902,11 @@ public:
         context_score = accumulate(buffer, buffer + 8, 0);
     }
 
-    inline void distance_mix(int len, int * desc_sim, double * dist_sim, double * output, int depth){
-        double a = this->a[depth];
-        double b = this->b[depth];
-        double c = this->c[depth];
-        double d = this->d[depth];
+    inline void distance_mix(int len, int * desc_sim, float * dist_sim, float * output, int depth){
+        float a = this->a[depth];
+        float b = this->b[depth];
+        float c = this->c[depth];
+        float d = this->d[depth];
         double desc_sim_mean, desc_sim_std;
         calc_mean_std(len, desc_sim, desc_sim_mean, desc_sim_std);
         for(int i=0; i < len; i++){
@@ -828,7 +916,7 @@ public:
 
 };
 
-inline void heapify(double scores[], uint32_t indices[], int n, int i) {
+inline void heapify(float scores[], uint32_t indices[], int n, int i) {
     while (true) {
         int largest = i;
         int left = 2 * i + 1;
@@ -841,7 +929,7 @@ inline void heapify(double scores[], uint32_t indices[], int n, int i) {
             largest = right;
 
         if (largest != i) {
-            double tmp_score = scores[i];
+            float tmp_score = scores[i];
             scores[i] = scores[largest];
             scores[largest] = tmp_score;
             uint32_t tmp_index = indices[i];
@@ -854,13 +942,13 @@ inline void heapify(double scores[], uint32_t indices[], int n, int i) {
     }
 }
 
-inline void build_heap(double scores[], uint32_t indices[], int n) {
+inline void build_heap(float scores[], uint32_t indices[], int n) {
     // Build heap (rearrange array)
     for (int i = n / 2 - 1; i >= 0; i--)
         heapify(scores, indices, n, i);
 }
 
-inline uint32_t heappop(double scores[], uint32_t indices[], int& n) {
+inline uint32_t heappop(float scores[], uint32_t indices[], int& n) {
     // if (n <= 0) This should never happen
     //     return -1; // or throw an exception
 
@@ -879,9 +967,9 @@ class sort_buffer {
 public:
     uint32_t * node_idxs;
     uint32_t * next_node_idxs;
-    double * scores;
-    int * next_desc_sim;
-    double * next_dist_sim;
+    float * scores;
+    int * desc_sim;
+    float * dist_sim;
 
     // v18: The following buffer is for context selection.
     // They work independently from the above buffers.
@@ -899,9 +987,9 @@ public:
         this->max_query_length = max_query_length;
         node_idxs = new uint32_t[buffer_size];
         next_node_idxs = new uint32_t[buffer_size];
-        scores = new double[buffer_size];
-        next_desc_sim = new int[buffer_size];
-        next_dist_sim = new double[buffer_size];
+        scores = new float[buffer_size];
+        desc_sim = new int[buffer_size];
+        dist_sim = new float[buffer_size];
 
         hiddens = (int8_t *) aligned_alloc(64, sizeof(int8_t) * buffer_size * 32);
         unmatched_lengths = new int[buffer_size];
@@ -912,8 +1000,8 @@ public:
         delete[] node_idxs;
         delete[] next_node_idxs;
         delete[] scores;
-        delete[] next_desc_sim;
-        delete[] next_dist_sim;
+        delete[] desc_sim;
+        delete[] dist_sim;
 
         free(hiddens);
         delete[] unmatched_lengths;
@@ -946,19 +1034,20 @@ public:
             branch_rows += levels[depth-1].size();
             sizes.push_back(levels[depth-1].size());
         }
-        cout << "Allocating " << float(sizeof(uint32_t) * BF_SIZE * branch_rows ) / 1024 / 1024 << " MB for "<< branch_rows << " bloom filters on the tree..." << endl;
-        this->bf_bits = (uint32_t *) aligned_alloc(64, sizeof(uint32_t) * branch_rows * BF_SIZE);
-        memset(this->bf_bits, 0, sizeof(uint32_t) * branch_rows * BF_SIZE);
+        int dim = BloomFilter::dim / 32;
+        cout << "Allocating " << float(sizeof(uint32_t) * dim * branch_rows ) / 1024 / 1024 << " MB for "<< branch_rows << " bloom filters on the tree..." << endl;
+        this->bf_bits = (uint32_t *) aligned_alloc(64, sizeof(uint32_t) * branch_rows * dim);
+        memset(this->bf_bits, 0, sizeof(uint32_t) * branch_rows * dim);
 
         // construct the tree
-        // cout << "Constructing  " << float(sizeof(TreeNode) * poi.num_rows) / 1024 / 1024 << " MB for "<< poi.num_rows << " leaf nodes at depth 0..." << endl;
+        cout << "Allocating " << float(sizeof(TreeNode) * poi.num_rows) / 1024 / 1024 << " MB for "<< poi.num_rows << " leaf nodes at depth 0..." << endl;
         TreeNode* leaf_nodes = (TreeNode *) aligned_alloc(64, sizeof(TreeNode) * poi.num_rows);
         memset(leaf_nodes, 0, sizeof(TreeNode) * poi.num_rows);
 
         for (uint32_t i = 0; i < poi.num_rows; ++i) {
             // sort the bloom filter for fast intersection calculation at leaf nodes
             sort(poi.bloom_filters[i].begin(), poi.bloom_filters[i].end());
-            leaf_nodes[i].set_leaf_node(poi.bloom_filters[i], poi.locations[i], i);
+            leaf_nodes[i].set_leaf_node(poi.bloom_filters[i], poi.locations + i * 2, i);
         }
         this->levels.push_back(leaf_nodes);
 
@@ -977,7 +1066,7 @@ public:
                     branch_nodes[cluster].add_child(leaf_nodes[leaf_idx]);
                 }
                 branch_nodes[cluster].compute_radius();
-                ptr += BF_SIZE;
+                ptr += dim;
             }
             this->levels.push_back(branch_nodes);
             leaf_nodes = branch_nodes;
@@ -991,7 +1080,7 @@ public:
         for (int depth = 0; depth < keep_depth - 1; ++depth) {
             for (int i = 0; i < this->sizes[depth]; ++i) {
                 TreeNode * node = this->levels[depth] + i;
-                if (node->bloom_filter.bits != this->bf_headers[depth] + node->node_idx * BF_SIZE) {
+                if (node->bloom_filter.bits != this->bf_headers[depth] + node->node_idx * dim) {
                     cerr << "Error constructing the tree. The bloom filter of node " << i << " at depth " << depth << " is not pointing to the correct location." << endl;
                     exit(1);
                 }
@@ -1007,6 +1096,29 @@ public:
             free(this->embeddings);
         }
         free(this->bf_bits);
+    }
+    
+    void dummy_embeddings(){
+        if (this->embeddings != nullptr) {
+            free(this->embeddings);
+        }
+        int total_nodes = 0;
+        for (int depth = 0; depth < levels.size(); ++depth) {
+            total_nodes += sizes[depth];
+        }
+        this->embeddings = (int32_t *) aligned_alloc(64, sizeof(int32_t) * 32 * total_nodes);
+        memset(this->embeddings, 0, sizeof(int32_t) * 32 * total_nodes);
+
+        this->emb_headers.resize(this->sizes.size());
+        int32_t *ptr = this->embeddings;
+        for (int i = 0; i < this->sizes.size(); ++i) {
+            int level_size = this->sizes[i];
+            this->emb_headers[i] = ptr;
+            for (int j = 0; j < level_size; ++j) {
+                this->levels[i][j].embedding = ptr;
+                ptr += 32;
+            }
+        }
     }
 
     void load_embeddings(const string &file_dir) {
@@ -1059,64 +1171,11 @@ public:
         }
     }
 
-    void prune_bits(){
-        // This function is to prune the common bits at each level (except the leaf level)
-        // This works for all dataset, and is especially effective for GeoGLUE dataset as it is heavily anonymized.
-        vector<uint16_t> common_bit_idxs;
-        uint32_t * bits = new uint32_t[BF_SIZE];
-        // set the common bits to all zeros;
-        memset(bits, 0, BF_SIZE * sizeof(uint32_t));
-        BloomFilter bf(bits);
-        for (int i = 0; i < NUM_SLICES * NUM_BITS; i++){
-            bool common = true;
-            for(int j = 0; j < sizes[0]; j++){
-                if(!(levels[0]+j)->bloom_filter.test(i)){
-                    common = false;
-                    break;
-                }
-            }
-            if(common){
-                bf.set(i);
-                common_bit_idxs.push_back(i);
-            }
-        }
-        // cout << "Common bits at level 0: " << common_bit_idxs.size() << endl;
-        // prune the common bits at each level
-        for (int j = 0; j < sizes[0]; j++){
-            (levels[0]+j)->bloom_filter ^= bf;
-        }
-
-        vector<uint16_t> next_common_bit_idxs;
-        for(int depth=1; depth < sizes.size()-1; depth++){
-            memset(bits, 0, BF_SIZE * sizeof(uint32_t));
-            for(uint16_t idx: common_bit_idxs){
-                bool common = true;
-                for(int j = 0; j < sizes[depth]; j++){
-                    if(!(levels[depth]+j)->bloom_filter.test(idx)){
-                        common = false;
-                        break;
-                    }
-                }
-                if(common){
-                    bf.set(idx);
-                    next_common_bit_idxs.push_back(idx);
-                }
-            }
-            // cout << "Common bits at level " << depth << ": " << next_common_bit_idxs.size() << endl;
-            common_bit_idxs = next_common_bit_idxs;
-            next_common_bit_idxs.clear();
-            for (int j = 0; j < sizes[depth]; j++){
-                (levels[depth]+j)->bloom_filter ^= bf;
-            }
-        }
-        delete[] bits;
-    }
-    
     vector<uint32_t> get_path(uint32_t leaf_idx){
         // This function is to get the path from the leaf node to the root node
         vector<uint32_t> path;
         TreeNode * node = &levels[levels.size()-1][leaf_idx];
-        while(node->parent != nullptr){
+        while(node != nullptr){
             path.push_back(node->node_idx);
             node = node->parent;
         }
@@ -1124,7 +1183,7 @@ public:
         return path;
     }
 
-    vector<uint32_t> beam_search_nnue(NNUE & nnue, vector<uint16_t> query_bloom_filter, double lat, double lon, vector<uint32_t> & beam_width, sort_buffer & buffer, int topk){
+    void beam_search_nnue(NNUE & nnue, vector<uint16_t> query_bloom_filter, float lat, float lon, vector<uint32_t> & beam_width, sort_buffer & buffer, vector<vector<uint32_t>> & results){
         // This function is to perform efficient beam search with NNUE
         // We first sort the query bloom filter.
         sort(query_bloom_filter.begin(), query_bloom_filter.end());
@@ -1133,354 +1192,113 @@ public:
         // prepare the query embedding
         alignas (64) int32_t * query_embedding = (int32_t *) aligned_alloc(64, sizeof(int32_t) * 32 * nnue.depth);
         nnue.encode_query_avx2(query_bloom_filter, query_embedding);
-        uint32_t write_ptr = 0;
-        // We run the evaluation loop twice.
-        // The first loop: evaluate the desc_sim, dist_sim, and the context selection scores
+        uint32_t num_candidates = 0;
+        // We first prepare the node idxs to be evaluated.
+        // In the first layer, we evaluate all the nodes.
         for(int i=0; i < sizes[0]; i++){
-            TreeNode * child = &levels[0][i];
-            nnue.eval_intersect(
-                query_length, 
-                query_numbers, 
-                query_embedding + 32 * 0, 
-                child, 
-                0,
-                buffer.next_desc_sim[write_ptr],
-                buffer.context_select_scores[write_ptr],
-                buffer.hiddens + write_ptr * 32,
-                buffer.unmatched_lengths[write_ptr],
-                buffer.unmatched_numbers + write_ptr * buffer.max_query_length,
-                false
-            );
-            double lat_diff = lat - child->location[0];
-            double lon_diff = lon - child->location[1];
-            double dist = max(0.0, sqrt(lat_diff * lat_diff + lon_diff * lon_diff) - child->radius);
-            buffer.next_dist_sim[write_ptr] = -log(dist + 1);
-            buffer.node_idxs[write_ptr] = i;
-            write_ptr++;
+            buffer.node_idxs[num_candidates] = i;
+            num_candidates++;
         }
-        // The second loop: context selection
-        // Sort the context node indices by the context selection scores via std::sort
-        #ifdef USE_CONTEXT
-        int top_context = write_ptr > MAX_TOP_CONTEXT? MAX_TOP_CONTEXT: write_ptr;
-        vector<int> in_beam_idxs(write_ptr);
-        iota(in_beam_idxs.begin(), in_beam_idxs.end(), 0);
-        partial_sort(in_beam_idxs.begin(), in_beam_idxs.begin() + top_context, in_beam_idxs.end(), [&](int a, int b) {
-            return buffer.context_select_scores[a] > buffer.context_select_scores[b];
-        });
-        // nested loop to find context for each node
-        // if founded, evaluate the context score
-        for (int i = 0; i < write_ptr; ++i) {
-            TreeNode * node = &levels[0][buffer.node_idxs[i]];
-            int unmatched_length = buffer.unmatched_lengths[i];
-            if (unmatched_length == 0) {
-                continue;
-            }
-            for (int j = 0; j < top_context; ++j) {
-                int in_beam_idx = in_beam_idxs[j];
-                TreeNode * context_node = &levels[0][buffer.node_idxs[in_beam_idx]];
-                // skip the node itself as it won't provide more bits as context
-                if (context_node->node_idx == node->node_idx) {
-                    continue;
-                }
-                // skip nodes that are 1000 meters away
-                double lat_diff = node->location[0] - context_node->location[0];
-                double lon_diff = node->location[1] - context_node->location[1];
-                double dist_sq = lat_diff * lat_diff + lon_diff * lon_diff;
-                if (dist_sq > 1000 * 1000) {
-                    continue;
-                }
-                // evaluate the context score
-                int context_score;
-                nnue.eval_context(
-                    context_node,
-                    unmatched_length,
-                    buffer.unmatched_numbers + i * buffer.max_query_length,
-                    buffer.hiddens + i * 32,
-                    0,
-                    context_score,
-                    false
-                );
-                buffer.next_desc_sim[i] += context_score;
-                break;
-            }
-        }
-        #endif
-        nnue.distance_mix(write_ptr, buffer.next_desc_sim, buffer.next_dist_sim, buffer.scores, 0);
-        build_heap(buffer.scores, buffer.node_idxs, write_ptr);
-        int candidate_size = min(beam_width[0], write_ptr);
-        // Here comes the most time consuming part
-        for(int depth=1; depth < levels.size(); depth++){
-            int next_candidate_size = min(beam_width[depth], sizes[depth]);
-            write_ptr = 0;
-            bool is_leaf = depth == levels.size() - 1;
-            // Similar to the process above.
-            while(candidate_size > 0){
-                uint32_t node_idx = heappop(buffer.scores, buffer.node_idxs, candidate_size);
-                TreeNode * node = &this->levels[depth-1][node_idx];
-                for(TreeNode* child: *(node->children)){
-                    nnue.eval_intersect(
-                        query_length, 
-                        query_numbers, 
-                        query_embedding + 32 * depth,
-                        child,
-                        depth, 
-                        buffer.next_desc_sim[write_ptr],
-                        buffer.context_select_scores[write_ptr],
-                        buffer.hiddens + write_ptr * 32,
-                        buffer.unmatched_lengths[write_ptr],
-                        buffer.unmatched_numbers + write_ptr * buffer.max_query_length,
-                        is_leaf
-                    );
-                    double lat_diff = lat - child->location[0];
-                    double lon_diff = lon - child->location[1];
-                    double dist = max(0.0, sqrt(lat_diff * lat_diff + lon_diff * lon_diff) - child->radius) + 1;
-                    buffer.next_dist_sim[write_ptr] = -log(dist);
-                    buffer.next_node_idxs[write_ptr] = child->node_idx;
-                    write_ptr++;
-                    if (write_ptr >= next_candidate_size){
-                        break;
-                    }
-                }
-                if (write_ptr >= next_candidate_size){
-                    break;
-                }
-            }
-            #ifdef USE_CONTEXT
-            int top_context = write_ptr > MAX_TOP_CONTEXT? MAX_TOP_CONTEXT: write_ptr;
-            in_beam_idxs.resize(write_ptr);
-            iota(in_beam_idxs.begin(), in_beam_idxs.end(), 0);
-            partial_sort(in_beam_idxs.begin(), in_beam_idxs.begin() + top_context, in_beam_idxs.end(), [&](int a, int b) {
-                return buffer.context_select_scores[a] > buffer.context_select_scores[b];
-            });
-            // nested loop to find context for each node
-            // if founded, evaluate the context score
-            for (int i = 0; i < write_ptr; ++i) {
-                TreeNode * node = &levels[depth][buffer.next_node_idxs[i]];
-                int unmatched_length = buffer.unmatched_lengths[i];
-                if (unmatched_length == 0) {
-                    continue;
-                }
-                for (int j = 0; j < top_context; ++j) {
-                    int in_beam_idx = in_beam_idxs[j];
-                    TreeNode * context_node = &levels[depth][buffer.next_node_idxs[in_beam_idx]];
-                    if (context_node->node_idx == node->node_idx) {
-                        continue;
-                    }
-                    double lat_diff = node->location[0] - context_node->location[0];
-                    double lon_diff = node->location[1] - context_node->location[1];
-                    double dist_sq = lat_diff * lat_diff + lon_diff * lon_diff;
-                    if (dist_sq > 1000 * 1000) {
-                        continue;
-                    }
-                    int context_score;
-                    nnue.eval_context(
-                        context_node, 
-                        unmatched_length,
-                        buffer.unmatched_numbers + i * buffer.max_query_length,
-                        buffer.hiddens + i * 32,
-                        depth,
-                        context_score,
-                        is_leaf
-                    );
-                    buffer.next_desc_sim[i] += context_score;
-                    break;
-                }
-            }
-            #endif
-            nnue.distance_mix(write_ptr, buffer.next_desc_sim, buffer.next_dist_sim, buffer.scores, depth);
-            build_heap(buffer.scores, buffer.next_node_idxs, write_ptr);
-            buffer.step();
-            candidate_size = write_ptr;
-        }
-        topk = min(topk, candidate_size);
-        vector<uint32_t> results(topk);
-        for(int i=0; i < topk; i++){
-            results[i] = heappop(buffer.scores, buffer.node_idxs, candidate_size);
-        }
-        return results;
-    }
 
-    vector<vector<uint32_t>> beam_search_nnue_intermediates(NNUE & nnue, vector<uint16_t> query_bloom_filter, double lat, double lon, vector<uint32_t> & beam_width, sort_buffer & buffer, int topk){
-        // This function will returns the intermediate node indices for 2nd, 3rd, ... level
-        // together with a top-k ranking of the leaf nodes.
-        // It is used to assist the PyTorch training and retrieval, reranking analysis.
-        // We first sort the query bloom filter.
-        sort(query_bloom_filter.begin(), query_bloom_filter.end());
-        int query_length = query_bloom_filter.size();
-        uint16_t * query_numbers = query_bloom_filter.data();
-        // Pre-compute the query embedding
-        alignas (64) int32_t * query_embedding = (int32_t *) aligned_alloc(64, sizeof(int32_t) * 32 * nnue.depth);
-        nnue.encode_query_avx2(query_bloom_filter, query_embedding);
-        uint32_t write_ptr = 0;
-        // We run the evaluation loop twice.
-        // The first loop: evaluate the desc_sim, dist_sim, and the context selection scores
-        for(int i=0; i < sizes[0]; i++){
-            TreeNode * child = &levels[0][i];
-            nnue.eval_intersect(
-                query_length, 
-                query_numbers, 
-                query_embedding + 32 * 0,
-                child, 
-                0,
-                buffer.next_desc_sim[write_ptr],
-                buffer.context_select_scores[write_ptr],
-                buffer.hiddens + write_ptr * 32,
-                buffer.unmatched_lengths[write_ptr],
-                buffer.unmatched_numbers + write_ptr * buffer.max_query_length,
-                false
-            );
-            double lat_diff = lat - child->location[0];
-            double lon_diff = lon - child->location[1];
-            double dist = max(0.0, sqrt(lat_diff * lat_diff + lon_diff * lon_diff) - child->radius)+ 1;
-            buffer.next_dist_sim[write_ptr] = -log(dist);
-            buffer.node_idxs[write_ptr] = i;
-            write_ptr++;
-        }
-        // The second loop: context selection
-        // Sort the context node indices by the context selection scores via std::sort
-        #ifdef USE_CONTEXT
-        int top_context = write_ptr > MAX_TOP_CONTEXT? MAX_TOP_CONTEXT: write_ptr;
-        vector<int> in_beam_idxs(write_ptr);
-        iota(in_beam_idxs.begin(), in_beam_idxs.end(), 0);
-        partial_sort(in_beam_idxs.begin(), in_beam_idxs.begin() + top_context, in_beam_idxs.end(), [&](int a, int b) {
-            return buffer.context_select_scores[a] > buffer.context_select_scores[b];
-        });
-        // nested loop to find context for each node
-        // if founded, evaluate the context score
-        for (int i = 0; i < write_ptr; ++i) {
-            TreeNode * node = &levels[0][buffer.node_idxs[i]];
-            int unmatched_length = buffer.unmatched_lengths[i];
-            if (unmatched_length == 0) {
-                continue;
-            }
-            for (int j = 0; j < top_context; ++j) {
-                int in_beam_idx = in_beam_idxs[j];
-                TreeNode * context_node = &levels[0][buffer.node_idxs[in_beam_idx]];
-                // skip the node itself
-                if (context_node->node_idx == node->node_idx) {
-                    continue;
-                }
-                // skip nodes that are 1000 meters away
-                double lat_diff = node->location[0] - context_node->location[0];
-                double lon_diff = node->location[1] - context_node->location[1];
-                double dist_sq = lat_diff * lat_diff + lon_diff * lon_diff;
-                if (dist_sq > 1000 * 1000) {
-                    continue;
-                }
-                // evaluate the context score
-                int context_score;
-                nnue.eval_context(
-                    context_node, 
-                    unmatched_length,
-                    buffer.unmatched_numbers + i * buffer.max_query_length,
-                    buffer.hiddens + i * 32,
-                    0,
-                    context_score,
-                    false
+        for(int depth=0; depth < levels.size(); depth++){
+            // Evaluate the intersect score for all the candidates
+            for(int candidate_id=0; candidate_id < num_candidates; candidate_id++){
+                uint32_t node_idx = buffer.node_idxs[candidate_id];
+                TreeNode * node = &levels[depth][node_idx];
+                nnue.eval_intersect(
+                    query_length, 
+                    query_numbers, 
+                    query_embedding + 32 * depth,
+                    node,
+                    depth, 
+                    buffer.desc_sim[candidate_id],
+                    buffer.context_select_scores[candidate_id],
+                    buffer.hiddens + candidate_id * 32,
+                    buffer.unmatched_lengths[candidate_id],
+                    buffer.unmatched_numbers + candidate_id * buffer.max_query_length
                 );
-                buffer.next_desc_sim[i] += context_score;
-                break;
+                // Compute the distance similarity
+                double lat_diff = lat - node->location[0];
+                double lon_diff = lon - node->location[1];
+                float dist = sqrt(lat_diff * lat_diff + lon_diff * lon_diff) - node->radius;
+                dist = dist > 0? dist + 1 : 1;
+                buffer.dist_sim[candidate_id] = -log(dist);
             }
-        }
-        #endif
-        nnue.distance_mix(write_ptr, buffer.next_desc_sim, buffer.next_dist_sim, buffer.scores, 0);
-        // vector<double> score_debug(write_ptr);
-        // memcpy(score_debug.data(), buffer.scores, write_ptr * sizeof(double));
-        build_heap(buffer.scores, buffer.node_idxs, write_ptr);
-        int candidate_size = min(beam_width[0], write_ptr);
-        // Prepare the result list
-        vector<vector<uint32_t>> results(levels.size());
-        for(int depth=1; depth < levels.size(); depth++){
-            int next_candidate_size = min(beam_width[depth], sizes[depth]);
-            write_ptr = 0;
-            bool is_leaf = depth == levels.size() - 1;
-            while(candidate_size > 0){
-                uint32_t node_idx = heappop(buffer.scores, buffer.node_idxs, candidate_size);
-                TreeNode * node = &this->levels[depth-1][node_idx];
-                for(TreeNode* child: *(node->children)){
-                    nnue.eval_intersect(
-                        query_length, 
-                        query_numbers, 
-                        query_embedding + 32 * depth,
-                        child,
-                        depth,
-                        buffer.next_desc_sim[write_ptr],
-                        buffer.context_select_scores[write_ptr],
-                        buffer.hiddens + write_ptr * 32,
-                        buffer.unmatched_lengths[write_ptr],
-                        buffer.unmatched_numbers + write_ptr * buffer.max_query_length,
-                        is_leaf
-                    );
-                    double lat_diff = lat - child->location[0];
-                    double lon_diff = lon - child->location[1];
-                    double dist = max(0.0, sqrt(lat_diff * lat_diff + lon_diff * lon_diff) - child->radius) + 1;
-                    buffer.next_dist_sim[write_ptr] = -log(dist);
-                    buffer.next_node_idxs[write_ptr] = child->node_idx;
-                    write_ptr++;
-                    if (write_ptr >= next_candidate_size){
-                        break;
-                    }
-                }
-                if (write_ptr >= next_candidate_size){
-                    break;
-                }
-            }
+
             #ifdef USE_CONTEXT
-            int top_context = write_ptr > MAX_TOP_CONTEXT? MAX_TOP_CONTEXT: write_ptr;
-            in_beam_idxs.resize(write_ptr);
+            int top_context = num_candidates > MAX_TOP_CONTEXT? MAX_TOP_CONTEXT: num_candidates;
+            vector<int> in_beam_idxs(num_candidates);
             iota(in_beam_idxs.begin(), in_beam_idxs.end(), 0);
             partial_sort(in_beam_idxs.begin(), in_beam_idxs.begin() + top_context, in_beam_idxs.end(), [&](int a, int b) {
                 return buffer.context_select_scores[a] > buffer.context_select_scores[b];
             });
             // nested loop to find context for each node
             // if founded, evaluate the context score
-            for (int i = 0; i < write_ptr; ++i) {
-                TreeNode * node = &levels[depth][buffer.next_node_idxs[i]];
+            for (int i = 0; i < num_candidates; ++i) {
+                TreeNode * node = &levels[depth][buffer.node_idxs[i]];
                 int unmatched_length = buffer.unmatched_lengths[i];
                 if (unmatched_length == 0) {
                     continue;
                 }
-                int original_score = buffer.next_desc_sim[i];
                 for (int j = 0; j < top_context; ++j) {
                     int in_beam_idx = in_beam_idxs[j];
-                    int context_select_score = buffer.context_select_scores[in_beam_idx];
-                    TreeNode * context_node = &levels[depth][buffer.next_node_idxs[in_beam_idx]];
+                    TreeNode * context_node = &levels[depth][buffer.node_idxs[in_beam_idx]];
+                    // skip the node itself as it won't provide more bits as context
                     if (context_node->node_idx == node->node_idx) {
                         continue;
                     }
-                    double lat_diff = node->location[0] - context_node->location[0];
-                    double lon_diff = node->location[1] - context_node->location[1];
-                    double dist_sq = lat_diff * lat_diff + lon_diff * lon_diff;
+                    // skip nodes that are 1000 meters away
+                    float lat_diff = node->location[0] - context_node->location[0];
+                    float lon_diff = node->location[1] - context_node->location[1];
+                    float dist_sq = lat_diff * lat_diff + lon_diff * lon_diff;
                     if (dist_sq > 1000 * 1000) {
                         continue;
                     }
+                    // evaluate the context score
                     int context_score;
                     nnue.eval_context(
-                        context_node, 
+                        context_node,
                         unmatched_length,
                         buffer.unmatched_numbers + i * buffer.max_query_length,
                         buffer.hiddens + i * 32,
                         depth,
-                        context_score,
-                        is_leaf
+                        context_score
                     );
-                    buffer.next_desc_sim[i] += context_score;
+                    buffer.desc_sim[i] += context_score;
                     break;
                 }
             }
             #endif
-            results[depth-1].resize(write_ptr);
-            memcpy(results[depth-1].data(), buffer.next_node_idxs, write_ptr * sizeof(uint32_t));
-            nnue.distance_mix(write_ptr, buffer.next_desc_sim, buffer.next_dist_sim, buffer.scores, depth);
-            build_heap(buffer.scores, buffer.next_node_idxs, write_ptr);
-            buffer.step();
-            candidate_size = write_ptr;
+            nnue.distance_mix(num_candidates, buffer.desc_sim, buffer.dist_sim, buffer.scores, depth);
+            build_heap(buffer.scores, buffer.node_idxs, num_candidates);
+            // pop the top k candidates, put their children into the next layer
+            // We consider both the beam width of the current layer and the next layer
+            int current_beam_width = min(beam_width[depth], sizes[depth]);
+            results.push_back(vector<uint32_t>(current_beam_width));
+            if (depth == levels.size() - 1){
+                for(int i=0; current_beam_width > 0; i++){
+                    results[depth][i] = heappop(buffer.scores, buffer.node_idxs, current_beam_width);
+                }
+            } else {
+                num_candidates = 0;
+                int next_beam_width = min(beam_width[depth+1], sizes[depth+1]);
+                for(int i=0; current_beam_width > 0; i++){
+                    uint32_t node_idx = heappop(buffer.scores, buffer.node_idxs, current_beam_width);
+                    results[depth][i] = node_idx;
+                    TreeNode * node = &levels[depth][node_idx];
+                    if (num_candidates < next_beam_width){
+                        for (TreeNode* child: *(node->children)){
+                            buffer.next_node_idxs[num_candidates] = child->node_idx;
+                            num_candidates++;
+                            if (num_candidates >= next_beam_width){
+                                break;
+                            }
+                        }
+                    }
+                }
+                buffer.step();
+            }
         }
-        topk = min(topk, candidate_size);
-        for (int i = 0; i < topk; ++i) {
-            results[levels.size()-1].push_back(heappop(buffer.scores, buffer.node_idxs, candidate_size));
-        }
-        return results;
     }
 };
     

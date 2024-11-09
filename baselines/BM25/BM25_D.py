@@ -4,7 +4,6 @@
     The next time of calling we just load the matrix and do the ranking.
 '''
 
-import jieba_fast
 import torch
 import numpy as np
 
@@ -18,7 +17,7 @@ max_y = -1e9
 import argparse
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset', type=str, default='GeoGLUE_clean')
+parser.add_argument('--dataset', type=str, default='Synthetic')
 parser.add_argument('--threads', type=int, default=16)
 
 args = parser.parse_args()
@@ -27,7 +26,18 @@ num_threads = args.threads
 
 processed_path = f'data/{dataset}'
 processed_poi_file = processed_path + '/poi.txt'
-processed_query_file = processed_path + '/test_anchor.txt'
+processed_query_file = processed_path + '/test.txt'
+
+if dataset == 'Synthetic':
+    from nltk.tokenize import word_tokenize
+    import nltk
+
+    # Download required resources
+    nltk.download('punkt')
+    tokenizer = lambda x: word_tokenize(x)
+else:
+    import jieba_fast
+    tokenizer = lambda x: jieba_fast.lcut_for_search(x)
 
 query_txt = []
 query_locations = []
@@ -36,7 +46,6 @@ query_truth = []
 with open(processed_query_file, 'r') as f:
     lines = f.readlines()
     for line in tqdm(lines, desc='Loading query text'):
-        line = line.strip().split('\t')
         line = line.strip().split('\t')
         query_txt.append(line[0])
         query_utm_lat = float(line[1])
@@ -53,8 +62,7 @@ with open(processed_poi_file, 'r') as f:
     lines = f.readlines()
     for line in tqdm(lines, desc='Splitting POI text'):
         line = line.strip().split('\t')
-        line = line.strip().split('\t')
-        poi_txt.append(jieba_fast.lcut_for_search(line[0]))
+        poi_txt.append(tokenizer(line[0]))
         poi_utm_lat = float(line[1])
         poi_utm_lon = float(line[2])
         poi_locations.append([poi_utm_lat, poi_utm_lon])
@@ -73,7 +81,7 @@ from rank_bm25 import BM25Okapi
 bm25 = BM25Okapi(poi_txt, k1=0.3, b=0.1)
 
 def bm25_search(query):
-    tokenized_query = jieba_fast.lcut_for_search(query)
+    tokenized_query = tokenizer(query)
     doc_scores = bm25.get_scores(tokenized_query)
     return doc_scores.astype(np.uint8)
 

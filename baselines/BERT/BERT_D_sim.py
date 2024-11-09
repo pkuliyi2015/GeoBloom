@@ -76,7 +76,7 @@ poi_locations = torch.from_numpy(poi_locations).cuda()
 top_k_indices = []
 batch_size = 16384
 for i in trange(test_embeddings.size(0)):
-    # grid search shows that 0.4 is the best for Meituan-Beijing and 0.8 is the best for GeoGLUE
+    # grid search shows that 0.4 is the best for Beijing and 0.8 is the best for GeoGLUE
     alpha = 0.4
 
     test_embedding = test_embeddings[i].unsqueeze(0)

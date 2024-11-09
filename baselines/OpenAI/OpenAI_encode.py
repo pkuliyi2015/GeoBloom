@@ -9,7 +9,13 @@ from openai import OpenAI
 # The embeddings in the paper is produced on March 2024.
 # It will cost $1 dollar.
 
-OPENAI_API_KEY = None
+# Set the OpenAI API key
+if os.path.exists('openai_api_key.txt'):
+    with open('openai_api_key.txt', 'r', encoding='utf-8') as f:
+        OPENAI_API_KEY = f.read().strip()
+else:
+    OPENAI_API_KEY = None
+
 assert OPENAI_API_KEY is not None
 client = OpenAI(api_key=OPENAI_API_KEY)
 

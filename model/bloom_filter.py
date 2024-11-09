@@ -3,46 +3,12 @@
     This is a vanilla Bloom filter, suggesting great room of improvements.
 '''
 
-
-import math
 import hashlib
 import xxhash
 import jieba_fast
 
 from tqdm import tqdm
 from struct import pack, unpack
-
-NUM_SLICES = 4
-NUM_BITS = 8192 
-
-def bloom_param_estimate(capacity, error_rate=0.01):
-    """Implements a space-efficient probabilistic data structure
-
-    capacity
-        this BloomFilter must be able to store at least *capacity* elements
-        while maintaining no more than *error_rate* chance of false
-        positives
-    error_rate
-        the error_rate of the filter returning false positives. This
-        determines the filters capacity. Inserting more than capacity
-        elements greatly increases the chance of false positives.
-    """
-    if not (0 < error_rate < 1):
-        raise ValueError("Error_Rate must be between 0 and 1.")
-    if not capacity > 0:
-        raise ValueError("Capacity must be > 0")
-    # given M = num_bits, k = num_slices, P = error_rate, n = capacity
-    #       k = log2(1/P)
-    # solving for m = bits_per_slice
-    # n ~= M * ((ln(2) ** 2) / abs(ln(P)))
-    # n ~= (k * m) * ((ln(2) ** 2) / abs(ln(P)))
-    # m ~= n * abs(ln(P)) / (k * (ln(2) ** 2))
-    num_slices = int(math.ceil(math.log(1.0 / error_rate, 2)))
-    bits_per_slice = int(math.ceil(
-        (capacity * abs(math.log(error_rate))) /
-        (num_slices * (math.log(2) ** 2))))
-    return num_slices, bits_per_slice
-
 
 def make_hashfuncs(num_slices, num_bits):
     if num_bits >= (1 << 31):
@@ -87,11 +53,6 @@ def make_hashfuncs(num_slices, num_bits):
 
     return _hash_maker, hashfn
 
-def letter_split(text, n=2):
-    ngrams = set()
-    for i in range(len(text) - n + 1):
-        ngrams.add(text[i:i + n])
-    return ngrams
 
 def ngram_split(text, n=3):
     ngrams = set()
@@ -100,54 +61,61 @@ def ngram_split(text, n=3):
             ngrams.add(text[i:i + k])
     return ngrams
 
-def hybrid_split(text):
+def hybrid_split(text, dict_tokenizer, ngram_tokenizer):
     # We don't segment the address into 2-gram. 
     # The address (fields[2]) is only cut by jieba_fast to mitigate unexpected split.
     fields = text.split(',')
-    tokens = ngram_split(fields[0], 2)
+    tokens = ngram_tokenizer(fields[0], 2)
     if len(fields) > 1:
-        tokens.update(ngram_split(fields[1], 2))
+        tokens.update(ngram_tokenizer(fields[1], 2))
     for field in fields:
-        tokens.update(jieba_fast.lcut_for_search(field))
+        tokens.update(dict_tokenizer(field))
     return tokens
 
-def query_split(text):
-    tokens = ngram_split(text, 2)
-    tokens.update(jieba_fast.lcut_for_search(text))
+def query_split(text, dict_tokenizer, ngram_tokenizer):
+    tokens = ngram_tokenizer(text, 2)
+    tokens.update(dict_tokenizer(text))
     return tokens
 
-def load_data(file_dir, is_query=True, query_tokenizer=query_split, poi_tokenizer=hybrid_split):
+def load_data(file_dir, num_slices, num_bits, is_query=True, dict_tokenizer=jieba_fast.lcut_for_search, ngram_tokenizer=ngram_split):
     bloom_filters = []
     locs = []
     truths = []
-    hash_func_inner, _ = make_hashfuncs(NUM_SLICES, NUM_BITS)
+
+    # For Beijing and Shanghai, we use anonymized hash function and location.
+    if 'Beijing' in file_dir or 'Shanghai' in file_dir:
+        try:
+            from encrypt_func import safe_hash_func, safe_address_func
+            hash_func_inner = lambda x: safe_hash_func(x, num_slices, num_bits)
+            address_func_inner = safe_address_func
+        except:
+            hash_func_inner, _ = make_hashfuncs(num_slices, num_bits)
+            address_func_inner = lambda x, y: (x, y)
+    else:
+        hash_func_inner, _ = make_hashfuncs(num_slices, num_bits)
+        address_func_inner = lambda x, y: (x, y)
 
     def hash_func(t):
         hash_list = list(hash_func_inner(t))
-        for i in range(1, NUM_SLICES):
-            hash_list[i] += i * NUM_BITS
+        for i in range(1, num_slices):
+            hash_list[i] += i * num_bits
         return set(hash_list)
-    
+
     with open(file_dir, 'r',) as f:
         lines = f.readlines()
         for line in tqdm(lines, desc='Loading '+ ('query' if is_query else 'POI') + ' data'):
             line = line.strip().lower().split('\t')
-            # if not is_query:
-            #     fields = set(line[0].split(','))
-            #     text = set()
-            #     for field in fields:
-            #         text.update(ngram_split(field))
-            # else:
-            #     text = ngram_split(line[0])
             if is_query:
-                text = query_tokenizer(line[0])
+                text = query_split(line[0], dict_tokenizer, ngram_tokenizer)
             else:
-                text = poi_tokenizer(line[0])
+                text = hybrid_split(line[0], dict_tokenizer, ngram_tokenizer)
             bloom_filter = set()
             for t in text:
                 bloom_filter.update(hash_func(t))
+            bloom_filter = list(bloom_filter)
+            bloom_filter.sort()
             bloom_filters.append(bloom_filter)
-            x, y = float(line[1]), float(line[2])
+            x, y = address_func_inner(float(line[1]), float(line[2]))
             locs.append([x, y])
             if is_query:
                 truths.append([int(x) for x in line[3].split(',')])

@@ -113,63 +113,79 @@ def build_kmeans_tree(dataset, poi_locs, width=8):
 
 def kmeans_cluster(dataset, nodes, width):
 
-    if 'GeoGLUE' in dataset and len(nodes) > 40000:
-        # If the dataset is GeoGLUE, we do special design to bypass the anonymization
-        # First, if the nodes are far more than unique locations, we split the nodes at the same location.
-        unique_locs = OrderedDict()
-        for i, node in enumerate(nodes):
-            loc = tuple(node.location)
-            if loc not in unique_locs:
-                unique_locs[loc] = []
-            unique_locs[loc].append(i)
+    unique_locs = OrderedDict()
+    for i, node in enumerate(nodes):
+        loc = tuple(node.location)
+        if loc not in unique_locs:
+            unique_locs[loc] = []
+        unique_locs[loc].append(i)
 
-        # remove the locations with few nodes from the unique_locs
-        unique_locs_few_nodes = OrderedDict()
-        for loc, node_idxs in unique_locs.items():
-            if len(node_idxs) < width // 2:
-                unique_locs_few_nodes[loc] = node_idxs
-
-        if len(unique_locs_few_nodes) > 0:
-
-            for loc in unique_locs_few_nodes:
-                del unique_locs[loc]
-
-            coords = list(unique_locs.keys())
-            from scipy.spatial import cKDTree
-            tree = cKDTree(coords)
-            # if a location has no more than 8 nodes, we merge it with the closest location
-            for loc, node_idxs in unique_locs_few_nodes.items():
-                _, idx = tree.query(loc, k=1)
-                closest_loc = coords[idx]
-                unique_locs[closest_loc].extend(node_idxs)
-
-        print(f'Unique locations: {len(unique_locs)}, nodes: {len(nodes)}')
-
-        if len(nodes) / len(unique_locs) > 1.2:
-            clusters = OrderedDict()
-            for loc, node_idxs in unique_locs.items():
-                # split the node_idxs into clusters
-                while len(node_idxs) > width:
-                    clusters[len(clusters)] = node_idxs[:width]
-                    node_idxs = node_idxs[width:]
-                if len(node_idxs) > 0:
-                    if len(node_idxs) >= width // 2:
-                        clusters[len(clusters)] = node_idxs
-                    else:
-                        clusters[len(clusters) - 1].extend(node_idxs)
-
-            return list(clusters.values())
-
-    coords = [x.location for x in nodes]
-    kmeans = MiniBatchKMeans(n_clusters=len(nodes) // width, random_state=0, batch_size=1000, n_init='auto')
+    coords = list(unique_locs.keys())
+    kmeans = MiniBatchKMeans(n_clusters=len(coords) // 6, random_state=0, batch_size=1000, n_init='auto')
     labels = kmeans.fit_predict(coords)
-    clusters = OrderedDict()
-    for i in range(len(nodes)):
-        if labels[i] not in clusters:
-            clusters[labels[i]] = []
-        clusters[labels[i]].append(i)
+    initial_clusters = OrderedDict()
+    for coord, label in zip(coords, labels):
+        if label not in initial_clusters:
+            initial_clusters[label] = []
+        initial_clusters[label].extend(unique_locs[coord])
+    # split all clusters with more than width nodes
+    split_clusters = OrderedDict()
+    for label, node_idxs in initial_clusters.items():
+        if len(node_idxs) >= 10:
+            # split node_idxs into multiple clusters
+            num_splits = len(node_idxs) // 8
+            for i in range(num_splits):
+                split_clusters[len(split_clusters)] = node_idxs[i * width:(i + 1) * width]
+            if len(node_idxs) % width > 0:
+                split_clusters[len(split_clusters)] = node_idxs[num_splits * width:]
+        else:
+            split_clusters[len(split_clusters)] = node_idxs
     
-    return list(clusters.values())
+    # There can be many clusters with less than width * 0.4 nodes, we merge them together
+    standard_clusters = OrderedDict()
+    small_clusters = OrderedDict()
+    for i, cluster in enumerate(split_clusters.values()):
+        if len(cluster) < 3:
+            small_clusters[i] = cluster
+        else:
+            standard_clusters[i] = cluster
+    
+    # merge small clusters to the closest standard cluster
+    standard_coords = []
+    standard_labels = []
+    for key in standard_clusters:
+        first_node = nodes[standard_clusters[key][0]]
+        standard_coords.append(first_node.location)
+        standard_labels.append(key)
+
+    small_coords = []
+    small_labels = []       
+    for key in small_clusters:
+        first_node = nodes[small_clusters[key][0]]
+        small_coords.append(first_node.location)
+        small_labels.append(key)
+
+    from scipy.spatial import cKDTree
+    tree = cKDTree(standard_coords)
+    _, idx = tree.query(small_coords, k=30)
+    for i, nearest_standard_idxs in enumerate(idx):
+        success = False
+        for nearest_standard_idx in nearest_standard_idxs:
+            standard_cluster = standard_clusters[standard_labels[nearest_standard_idx]]
+            if len(standard_cluster) > width:
+                continue
+            else:
+                success = True
+                standard_clusters[standard_labels[nearest_standard_idx]].extend(small_clusters[small_labels[i]])
+                break
+        if not success:
+            print(f'Warning: Failed to merge small cluster {small_labels[i]} with any standard cluster')
+
+    result = list(standard_clusters.values())
+    print(f'{len(result)} clusters after merging, with max size {max([len(cluster) for cluster in result])}')
+    return result
+    
+
 
 def build_from_clusters(clusters, prev_level):
     current_level = []

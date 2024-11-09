@@ -23,8 +23,8 @@ with open(f'data/{dataset}/poi.txt', 'r', encoding='utf-8') as file:
         poi_line = poi_line.strip()
         fields = poi_line.split('\t')
         assert len(fields) == 3
-        if 'Meituan' in dataset:
-            # We ignore address for Meituan, otherwise the results are too bad
+        if 'Beijing' in dataset or 'Shanghai' in dataset:
+            # We ignore address for the two Meituan datasets, otherwise the results are too bad
             components = fields[0].split(',')
             poi_texts.append(components[0])
         else:

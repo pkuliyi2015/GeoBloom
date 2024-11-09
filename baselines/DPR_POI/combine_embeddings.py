@@ -49,7 +49,7 @@ if __name__ == "__main__":
 
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset",default="MeituanBeijing")
+    parser.add_argument("--dataset",default="Beijing")
 
     args = parser.parse_args()
     dataset = args.dataset

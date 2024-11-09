@@ -4,7 +4,7 @@ from tqdm import trange
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset', type=str, default='MeituanShanghai')
+parser.add_argument('--dataset', type=str, default='Shanghai')
 parser.add_argument('--portion', type=str, default='0.1')
 
 dataset = parser.parse_args().dataset

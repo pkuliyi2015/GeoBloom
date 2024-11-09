@@ -1,9 +1,14 @@
 import os
 import numpy as np
 
-def custom_ndcg(prediction, truth, k):
+def fast_ndcg(prediction, truth, k):
+    '''
+        This fast_ndcg regard all labeled queries as equally important,
+        As the Beijing and Shanghai data is provided in this way (The user clicks as no order),
+        and the GeoGLUE dataset has only 1 truth for each query.
+    '''
     # prediction: list of indices
-    # truth: list of indices
+    # truth: list of indices. 
     # k: int
     # return: float
     dcg = 0
@@ -46,18 +51,18 @@ def evaluate(top100, truths, metrics):
 if __name__ == '__main__':
 
     datasets = [
-        'MeituanBeijing',
-        'MeituanShanghai',
-        'GeoGLUE',
-        'GeoGLUE_clean',
+        # 'Beijing',
+        # 'Shanghai',
+        # 'GeoGLUE',
+        # 'GeoGLUE_clean',
+        'Synthetic',
     ]
     metrics = {
         # 'Recall @ 1000': lambda p, t: recall(p, t, 1000),
         'Recall @ 20': lambda p, t: recall(p, t, 20),
         'Recall @ 10': lambda p, t: recall(p, t, 10),
-        'NDCG @ 5': lambda p, t: custom_ndcg(p, t, 5),
-        'NDCG @ 1': lambda p, t: custom_ndcg(p, t, 1),
-
+        'NDCG @ 5': lambda p, t: fast_ndcg(p, t, 5),
+        'NDCG @ 1': lambda p, t: fast_ndcg(p, t, 1),
     }
     models = [
         # 'BM25',
@@ -75,7 +80,7 @@ if __name__ == '__main__':
     ]
     for dataset in datasets:
         query_truth = []
-        with open(f'data/{dataset}/test_anchor.txt', 'r') as f:
+        with open(f'data/{dataset}/test.txt', 'r') as f:
             for line in f:
                 line = line.strip().split('\t')
                 query_truth_str = line[3]
