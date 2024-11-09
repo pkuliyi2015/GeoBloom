@@ -1,6 +1,6 @@
 # GeoBloom
 
-- This is the official repository of the paper:  *GeoBloom: Revitalizing Lightweight Models for Geographic Information Retrieval*
+- This is the official repository of the paper:  *GeoBloom: Revisiting Lightweight Models for Geographic Information Retrieval*
 
 ## Update
 - 2024/11/09:
@@ -143,12 +143,12 @@ The training requires an NVIDIA GPU. We tested on NVIDIA V100 32GB, which can ru
 
 #### Steps:
 - Compile the nnue engine as instructed above.
-- Run the training script. It supports all datasets. For Beijing and Shanghai, we recommend epochs 15. For GeoGLUE and GeoGLUE-clean, we recommend epochs 8.
+- Run the training script. It supports all datasets. For Beijing and Shanghai, we recommend epochs 15. For GeoGLUE and GeoGLUE-clean, we recommend epochs 5.
 
   - **python model/geobloom_v19.py --dataset Beijing --epochs 15**
   - **python model/geobloom_v19.py --dataset Shanghai --epochs 15**
-  - **python model/geobloom_v19.py --dataset GeoGLUE_clean --epochs 8**
-  - **python model/geobloom_v19.py --dataset GeoGLUE --epochs 8**
+  - **python model/geobloom_v19.py --dataset GeoGLUE_clean --epochs 5**
+  - **python model/geobloom_v19.py --dataset GeoGLUE --epochs 5**
 - Retrieve the results:
 
   - **nnue/v19/nnue Beijing test 8 400-400-400-400**
@@ -226,7 +226,7 @@ Recall@20        Recall@10       NDCG@5          NDCG@1
 =========================================================
 ```
 
-**Note: **The latest training will automatically overwrite the quantized model and pre-computed embeddings from previous training.
+**Note:** The latest training will automatically overwrite the quantized model and pre-computed embeddings from previous training.
 
 To restore from a certain best training, run:
 
@@ -297,8 +297,7 @@ Total - 197.77
 
 ## Future Development
 
-- Currently, the training is significantly slower than the inference, as we treat Bloom filters as dense vectors and only rely on PyTorch torch.compile for acceleration. It should be much faster if we implement custom CUDA kernels.
-- Sophisticated Bloom filters and index design can be applied to this framework to achieve better space efficiency, making it possible to deploy as offline map apps.
+- Sophisticated Bloom filters and indexing methods can be applied to this framework to achieve better space efficiency, making it possible to deploy as offline map apps.
 
 ## Contents
 
@@ -315,6 +314,12 @@ GeoBloom
 │   ├── GeoGLUE.7z    # Please decompress the file from this repo
 │   ├── GeoGLUE_clean.7z # Please decompress the file from this repo
 │   └── geoglue_clean.py # Script to generate clean dataset with OpenAI
+├── data_util/
+│   ├── geoglue_clean.py # Script to generate clean dataset with OpenAI GPT-4o
+│   ├── sanity_check_ours.txt # Our matching results of GPT-API (at the paper time we don't have GPT-4o)
+│   ├── token_order_subset.py # Generate the token order subset of GeoGLUE-clean
+│   ├── token_order_synthetic.py # Generate the token order synthetic dataset
+│   └── train_portion.py # Split training data into various portions
 ├── data_bin/          # The model will generate binary files here for C++ inference
 │   ├── Beijing/       # Binary files for Beijing dataset
 │   ├── Shanghai/      # Binary files for Shanghai dataset
@@ -325,16 +330,18 @@ GeoBloom
 │   ├── bloom_filter_tree.py   # Organize the Bloom filter into a tree-based index
 │   ├── dataset.py            # PyTorch dataset, can preprocess dataset into Bloom filters
 │   ├── geobloom_v19.py       # Main script with model definition and training
+│   ├── geobloom_wo_order.py  # A simplified GeoBloom NNUE model
+│   ├── geobloom_w_order.py   # A simplified GeoBloom NNUE model where we add a token order component
 │   ├── kmeans_tree.py        # Run KMeans on coordinates to form hierarchical tree
-│   ├── lambdarank.py         # The lambda rank loss function
-│   └── train_portion.py      # Split training data into various portions
+│   └── lambdarank.py         # The lambda rank loss function
 ├── nnue/                     # Native inference engine in C++
 │   └── v19/
 │       ├── nnue_avx2.h              # Header for data structures and NNUE engine
 │       └── nnue.cpp                 # Main executable source file
 ├── result/
-│   ├── analyze.py            # Easily analyze the outcomes of GeoBloom
-│   └── evaluation.py         # Script for evaluating baseline outcomes
+│   ├── analyze.py            # Analyze the outcomes of GeoBloom with raw text and distances
+│   ├── evaluation.py         # Script for evaluating baseline outcomes
+│   └── summary.py            # Summarize the results of GeoBloom of consecutive runs
 └── README.md                 # Project documentation and instructions
 
 ```
