@@ -74,7 +74,7 @@ Our methods required:
 
   - **g++ nnue/v19/nnue.cpp -o nnue/v19/nnue -pthread -mavx2 -O3 -fno-tree-vectorize**
 
-### Unsupervised Effectiveness
+### Effectiveness in Unsupervised Settings
 
 GeoBloom supports unsupervised effectiveness evaluation without labeled queries.
 
@@ -104,13 +104,14 @@ Allocating 45.834 MB for 23467 bloom filters on the tree...
 Allocating 14.9438 MB for 122420 leaf nodes at depth 0...
 Infering test candidates...
 Searching 10000th query...
-Total search time of all threads: 19.771s, Query Per Second: 854.737
+Total search time of all threads: 25.4767s, Query Per Second: 663.312
 =============== Intermediate Recall Scores ==============
-0.986885        0.881396        0.808939        0.761202
+0.986885        0.882787        0.811089        0.763087
 ====================== Evaluation =======================
 Recall@20        Recall@10       NDCG@5          NDCG@1
-0.637374        0.593689        0.474783        0.406415
+0.638580        0.594371        0.474296        0.405231
 =========================================================
+Predictions saved to data_bin/Beijing/test_nodes.bin
 ```
 
 - GeoGLUE_clean
@@ -137,7 +138,7 @@ Note:
 - We support multi-threading (8 threads in the above example) for your convenience, but the QPS is always evaluated per thread.
 - Here, we simply choose a unified beam width (e.g., 4000) and it can be quite "slow". You can set different beam widths at each tree level to obtain faster speed.
 
-### Supervised Effectiveness
+### Effectiveness in Supervised Settings
 
 The training requires an NVIDIA GPU. We tested on NVIDIA V100 32GB, which can run the script without issues.
 
@@ -164,35 +165,37 @@ Allocating 45.834 MB for 23467 bloom filters on the tree...
 Allocating 14.9438 MB for 122420 leaf nodes at depth 0...
 Infering test candidates...
 Searching 10000th query...
-Total search time of all threads: 19.7889s, Query Per Second: 853.965
+Total search time of all threads: 20.4556s, Query Per Second: 826.129
 =============== Intermediate Recall Scores ==============
-0.992959        0.943726        0.890166        0.859498
+0.993362        0.943685        0.888385        0.857890
 ====================== Evaluation =======================
 Recall@20        Recall@10       NDCG@5          NDCG@1
-0.781922        0.734642        0.595412        0.512516
+0.783518        0.736276        0.596269        0.515178
 =========================================================
-Predictions saved to data_bin/Beijing/test_nodes.bin
+Predictions saved to data_bin/Beijing/test_nodes.bin 
 ```
 
 - GeoGLUE_clean
 
 ```
-Beam width: 1000 1000 1000 1000 Loading dataset from path: data_bin/GeoGLUE_clean/
-Allocating 217.443 MB for 111331 bloom filters on the tree...
+Beam width: 800 800 800 800 Loading dataset from path: data_bin/GeoGLUE_clean/
+Allocating 277.549 MB for 142105 bloom filters on the tree...
+Allocating 94.8846 MB for 777295 leaf nodes at depth 0...
 Infering test candidates...
 Searching 10000th query...
-Total search time of all threads: 62.0868s, Query Per Second: 195.806
+Total search time of all threads: 91.163s, Query Per Second: 133.355
 =============== Intermediate Recall Scores ==============
-0.994078        0.946039        0.913712        0.886896
+0.987415        0.962408        0.932302        0.892161
 ====================== Evaluation =======================
 Recall@20        Recall@10       NDCG@5          NDCG@1
-0.772559        0.717776        0.550100        0.427161
+0.784157        0.729456        0.545062        0.413095
 =========================================================
 Predictions saved to data_bin/GeoGLUE_clean/test_nodes.bin
 ```
 
-- The above QPS is obtained from an old Intel(R) Xeon(R) CPU E5-2698 v4 @ 2.20GHz.
-- If you use a more powerful CPU, like an i9-10900X @ 3.70GHz in the paper, the QPS will be at least twice more.
+- The above QPS is obtained from an Intel(R) Xeon(R) CPU E5-2698 v4 @ 2.20GHz, measured by single thread.
+- If you use a more powerful CPU in single-core, like an i9-10900X @ 3.70GHz in the paper, the QPS will be at least twice more.
+- However, we recommend using multi-threading to accelerate the inference. The NNUE engine now handles queries in batches, but it can be modified to handle 1 query with multiple threads and the efficiency will be linearly proportional to the number of threads.
 
 ### Varying Training Data Portions
 
@@ -255,7 +258,7 @@ Final VmHWM: 132 MB
 - The disk usage of our model ise the sum of poi.bin, node_v19.bin, nnue_v19.bin, and tree.bin in the data_bin folder.
   - In NNUE quantization scheme, not every parameter is stored in 16-bit numbers, preventing a fair comparison.
   - We thereby provide an option, by running.
-    - python model/geobloom.py --dataset GeoGLUE_clean --task size_test
+    - **python model/geobloom_v19.py --dataset GeoGLUE_clean --task size_test**
   - It converts everything into 16-bit. Then, you can directly compare with PLMs (e.g., DPR_D), which need much larger sizes when stored in 16-bit.
 
 You should see something like this:
@@ -264,10 +267,10 @@ You should see something like this:
 ======== File Sizes in MB ========
 Components
 Model           20.10
-Embeddings      54.24
-Bloom Filters   119.62
-Tree            3.82
-Total - 197.77
+Embeddings      56.12
+Bloom Filters   113.69
+Tree            4.05
+Total - 193.96
 ==================================
 ```
 
