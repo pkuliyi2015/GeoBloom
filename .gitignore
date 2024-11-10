@@ -58,9 +58,15 @@ data_bin/GeoGLUE*/nnue_v19.bin
 data_bin/GeoGLUE*/node_v19_size_test.bin
 data_bin/GeoGLUE*/nnue_v19_size_test.bin
 data_bin/GeoGLUE*/node_v19_size_test.bin
+# No longer tracking these trained models as they frequently change
+data_bin/Beijing/nnue_v19.bin
+data_bin/Beijing/node_v19.bin
 data_bin/Beijing/test_nodes.bin
 data_bin/Beijing/nnue_v19_size_test.bin
 data_bin/Beijing/node_v19_size_test.bin
+# No longer tracking these trained models as they frequently change
+data_bin/Shanghai/nnue_v19.bin
+data_bin/Shanghai/node_v19.bin
 data_bin/Shanghai/test_nodes.bin
 data_bin/Shanghai/nnue_v19_size_test.bin
 data_bin/Shanghai/node_v19_size_test.bin
@@ -76,3 +82,6 @@ result/*.txt
 debug/
 model/encrypt_func.py
 openai_api_key.txt
+result/*.log
+result/*.png
+result/GeoBloom/*
