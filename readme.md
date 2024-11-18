@@ -39,11 +39,11 @@ While our framework can run on various devices, to ensure it works smoothly, we 
 Our methods required:
 
 - PyTorch>=2.1.1
+- cuda-cudart (install via **conda install -c conda-forge cuda-cudart**. This is for the custom CUDA kernel compilation.)
+- jieba_fast
 - tqdm
 - scikit-learn==1.4.2
 - xxhash==3.4.1
-- torch-scatter==2.1.2
-- torch-sparse==0.6.18
 
 ### Dataset Preparation
 
