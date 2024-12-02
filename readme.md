@@ -50,17 +50,14 @@ Our methods required:
 - Clone this repository.
 - Decompress the GeoGLUE.7z and GeoGLUE_clean.7z in the data folder.
 - The Beijing and Shanghai raw datasets are not included in this repo due to license constraints. However,
-  - We provide the Bloom filters and the anonymized locations so that you can quickly reproduce the results of GeoBloom.
-  - We also provide two strong baselines, i.e, the OpenAI and DPR embeddings, for your convenience.
-  - If you are interested in the raw datasets, please contact us via your institution email to request access under the license constraints.
-  - Email: liyi0067@e.ntu.edu.sg, shang006@e.ntu.edu.sg, or 386029724@qq.com (in case of institutional email is not accessible).
-- (Optional) We provide the OpenAI embeddings and trained DPR embeddings in Beijing and Shanghai for your convenience. [Google Drive](https://drive.google.com/drive/folders/1GeB7A90cocWvUJGysVxyK1pqyHKcfX5B?usp=drive_link)
+  - We provide the Bloom filters and the anonymized locations so that you can quickly reproduce results of GeoBloom.
+  - We provide the OpenAI, BERT, and trained DPR embeddings in Beijing and Shanghai for your convenience. [Google Drive](https://drive.google.com/drive/folders/1GeB7A90cocWvUJGysVxyK1pqyHKcfX5B?usp=drive_link)
 
 #### Notes
 
 - The **GeoGLUE** dataset is under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/?spm=5176.12282016.0.0.63b47586Niz8D0) license. You should strictly follow the license to use the dataset.
   - The original dataset is from [modelscope.cn](https://www.modelscope.cn/datasets/iic/GeoGLUE/summary)
-  - We extract the text, latitude, longitude, and ground truth ids, project them into Euclidean space with pyproj library:
+  - We extract the text, latitude, longitude, and ground truth ids, and project them into Euclidean space with pyproj library:
     - proj = pyproj.Transformer.from_crs( 'epsg:4326', 'epsg:2385')
 - As GeoGLUE contains over 50% of fake POIs, we align their queries to real POIs, which forms a new dataset GeoGLUE-clean.
   - The text, latitude, and longitude of each query remain unchanged.
@@ -80,7 +77,7 @@ GeoBloom supports unsupervised effectiveness evaluation without labeled queries.
 
 #### Steps:
 
-- Compile the nnue engine as instructed above.
+- Compile the NNUE engine as instructed above.
 - For GeoGLUE and GeoGLUE-clean, you need to preprocess the dataset into Bloom filters and construct the tree:
 
   - **python model/dataset.py --dataset GeoGLUE**
