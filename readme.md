@@ -1,8 +1,9 @@
-# GeoBloom
+# GeoBloom (VLDB 2025）
 
 - This is the official repository of the paper:  *GeoBloom: Revisiting Lightweight Models for Geographic Information Retrieval*
 
 ## Update
+- 2025/01/16: We are excited to announce that our paper is accepted by [VLDB 2025](https://www.vldb.org/2025/)!
 - 2024/11/09:
   - We fixed the bug in bloom_filter_tree.py and the training process. Now the effectiveness is improved comparing to the paper results.
   - We replace the dense training with the index-based training based on a hybrid dense-sparse training strategy at different depths of the tree.
